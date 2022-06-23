@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// nolint: golint
 package fuzz
 
 import (
@@ -30,7 +29,7 @@ func FuzzGrpcGenGenerate(data []byte) int {
 	if err != nil {
 		return 0
 	}
-	if !proxyValid(proxy) {
+	if !ProxyValid(proxy) {
 		return 0
 	}
 

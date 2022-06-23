@@ -32,7 +32,6 @@ import (
 	"github.com/mitchellh/copystructure"
 
 	"istio.io/api/label"
-	"istio.io/istio/pilot/pkg/networking"
 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
 	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/config/constants"
@@ -80,9 +79,10 @@ type Service struct {
 	// Do not access directly. Use GetAddressForProxy
 	DefaultAddress string `json:"defaultAddress,omitempty"`
 
-	// AutoAllocatedAddress specifies the automatically allocated
-	// IPv4 address out of the reserved Class E subnet
-	// (240.240.0.0/16) for service entries with non-wildcard
+	// AutoAllocatedIPv4Address and AutoAllocatedIPv6Address specifies
+	// the automatically allocated IPv4/IPv6 address out of the reserved
+	// Class E subnet (240.240.0.0/16) or reserved Benchmarking IP range
+	// (2001:2::/48) in RFC5180.for service entries with non-wildcard
 	// hostnames. The IPs assigned to services are not
 	// synchronized across istiod replicas as the DNS resolution
 	// for these service entries happens completely inside a pod
@@ -90,7 +90,8 @@ type Service struct {
 	// to allocate IPs is pretty deterministic that at stable state, two
 	// istiods will allocate the exact same set of IPs for a given set of
 	// service entries.
-	AutoAllocatedAddress string `json:"autoAllocatedAddress,omitempty"`
+	AutoAllocatedIPv4Address string `json:"autoAllocatedIPv4Address,omitempty"`
+	AutoAllocatedIPv6Address string `json:"autoAllocatedIPv6Address,omitempty"`
 
 	// Resolution indicates how the service instances need to be resolved before routing
 	// traffic. Most services in the service registry will use static load balancing wherein
@@ -459,11 +460,6 @@ type IstioEndpoint struct {
 	// If specified, the fully qualified Pod hostname will be "<hostname>.<subdomain>.<pod namespace>.svc.<cluster domain>".
 	SubDomain string
 
-	// The ingress tunnel supportability of this endpoint.
-	// If this endpoint sidecar proxy does not support h2 tunnel, this endpoint will not show up in the EDS clusters
-	// which are generated for h2 tunnel.
-	TunnelAbility networking.TunnelAbility
-
 	// Determines the discoverability of this endpoint throughout the mesh.
 	DiscoverabilityPolicy EndpointDiscoverabilityPolicy `json:"-"`
 
@@ -769,9 +765,13 @@ func (s *Service) GetAddressForProxy(node *Proxy) string {
 			}
 		}
 
-		if node.Metadata.DNSCapture && node.Metadata.DNSAutoAllocate &&
-			s.DefaultAddress == constants.UnspecifiedIP && s.AutoAllocatedAddress != "" {
-			return s.AutoAllocatedAddress
+		if node.Metadata.DNSCapture && node.Metadata.DNSAutoAllocate && s.DefaultAddress == constants.UnspecifiedIP {
+			if node.SupportsIPv4() && s.AutoAllocatedIPv4Address != "" {
+				return s.AutoAllocatedIPv4Address
+			}
+			if node.SupportsIPv6() && s.AutoAllocatedIPv6Address != "" {
+				return s.AutoAllocatedIPv6Address
+			}
 		}
 	}
 
@@ -846,9 +846,7 @@ func (s *Service) DeepCopy() *Service {
 
 	if s.ServiceAccounts != nil {
 		out.ServiceAccounts = make([]string, len(s.ServiceAccounts))
-		for i, sa := range s.ServiceAccounts {
-			out.ServiceAccounts[i] = sa
-		}
+		copy(out.ServiceAccounts, s.ServiceAccounts)
 	}
 	out.ClusterVIPs = s.ClusterVIPs.DeepCopy()
 	return &out

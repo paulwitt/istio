@@ -30,6 +30,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 
+	"istio.io/istio/pkg/kube"
 	"istio.io/istio/security/pkg/pki/ca"
 	"istio.io/istio/security/pkg/pki/util"
 	certutil "istio.io/istio/security/pkg/util"
@@ -93,7 +94,8 @@ func NewWebhookController(gracePeriodRatio float32, minGracePeriod time.Duration
 	client clientset.Interface,
 	k8sCaCertFile string,
 	secretNames, dnsNames []string,
-	secretNamespace string, certIssuer string) (*WebhookController, error) {
+	secretNamespace string, certIssuer string,
+) (*WebhookController, error) {
 	if gracePeriodRatio < 0 || gracePeriodRatio > 1 {
 		return nil, fmt.Errorf("grace period ratio %f should be within [0, 1]", gracePeriodRatio)
 	}
@@ -162,7 +164,7 @@ func (wc *WebhookController) Run(stopCh <-chan struct{}) {
 		// upsertSecret to update and insert secret
 		// it throws error if the secret cache is not synchronized, but the secret exists in the system.
 		// Hence waiting for the cache is synced.
-		if !cache.WaitForCacheSync(stopCh, wc.scrtController.HasSynced) {
+		if !kube.WaitForCacheSync(stopCh, wc.scrtController.HasSynced) {
 			log.Error("failed to wait for cache sync")
 		}
 	}
@@ -189,7 +191,7 @@ func (wc *WebhookController) upsertSecret(secretName, dnsName, secretNamespace s
 
 	requestedLifetime := time.Duration(0)
 	// Now we know the secret does not exist yet. So we create a new one.
-	chain, key, caCert, err := GenKeyCertK8sCA(wc.clientset, dnsName, secretName, secretNamespace, wc.k8sCaCertFile, wc.certIssuer, true, requestedLifetime)
+	chain, key, caCert, err := GenKeyCertK8sCA(wc.clientset, dnsName, wc.k8sCaCertFile, wc.certIssuer, true, requestedLifetime)
 	if err != nil {
 		log.Errorf("failed to generate key and certificate for secret %v in namespace %v (error %v)",
 			secretName, secretNamespace, err)
@@ -310,7 +312,7 @@ func (wc *WebhookController) refreshSecret(scrt *v1.Secret) error {
 	}
 
 	requestedLifetime := time.Duration(0)
-	chain, key, caCert, err := GenKeyCertK8sCA(wc.clientset, dnsName, scrtName, namespace, wc.k8sCaCertFile, wc.certIssuer, true, requestedLifetime)
+	chain, key, caCert, err := GenKeyCertK8sCA(wc.clientset, dnsName, wc.k8sCaCertFile, wc.certIssuer, true, requestedLifetime)
 	if err != nil {
 		return err
 	}

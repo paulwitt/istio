@@ -142,19 +142,21 @@ func NetworkingIngressAvailable(client kube.Client) bool {
 
 // NewController creates a new Kubernetes controller
 func NewController(client kube.Client, meshWatcher mesh.Holder,
-	options kubecontroller.Options) model.ConfigStoreCache {
+	options kubecontroller.Options,
+) model.ConfigStoreController {
 	if ingressNamespace == "" {
 		ingressNamespace = constants.IstioIngressNamespace
 	}
 
 	ingressInformer := client.KubeInformer().Networking().V1beta1().Ingresses()
+	_ = ingressInformer.Informer().SetTransform(kube.StripUnusedFields)
 	serviceInformer := client.KubeInformer().Core().V1().Services()
 
 	var classes v1beta1.IngressClassInformer
 	if NetworkingIngressAvailable(client) {
 		classes = client.KubeInformer().Networking().V1beta1().IngressClasses()
 		// Register the informer now, so it will be properly started
-		_ = classes.Informer()
+		_ = classes.Informer().SetTransform(kube.StripUnusedFields)
 	} else {
 		log.Infof("Skipping IngressClass, resource not supported")
 	}
@@ -222,8 +224,7 @@ func (c *controller) shouldProcessIngressUpdate(ing *ingress.Ingress) (bool, err
 	return preProcessed, nil
 }
 
-func (c *controller) onEvent(key interface{}) error {
-	item := key.(types.NamespacedName)
+func (c *controller) onEvent(item types.NamespacedName) error {
 	event := model.EventUpdate
 	ing, err := c.ingressLister.Ingresses(item.Namespace).Get(item.Name)
 	if err != nil {

@@ -18,22 +18,17 @@
 package cacustomroot
 
 import (
-	"context"
 	"fmt"
-	"net"
 	"os"
 	"path"
 	"testing"
-	"time"
 
 	"istio.io/istio/pkg/test/echo/common/scheme"
-	epb "istio.io/istio/pkg/test/echo/proto"
 	"istio.io/istio/pkg/test/env"
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/check"
 	"istio.io/istio/pkg/test/framework/components/echo/match"
-	"istio.io/istio/pkg/test/util/retry"
 )
 
 const (
@@ -95,10 +90,6 @@ spec:
 func TestTrustDomainValidation(t *testing.T) {
 	framework.NewTest(t).Features("security.peer.trust-domain-validation").Run(
 		func(ctx framework.TestContext) {
-			if ctx.AllClusters().IsMulticluster() {
-				ctx.Skip("https://github.com/istio/istio/issues/37307")
-			}
-
 			testNS := apps.Namespace
 
 			ctx.ConfigIstio().YAML(testNS.Name(), fmt.Sprintf(policy, testNS.Name())).ApplyOrFail(ctx)
@@ -135,7 +126,8 @@ func TestTrustDomainValidation(t *testing.T) {
 						ctx.NewSubTest(name).Run(func(t framework.TestContext) {
 							t.Helper()
 							opt := echo.CallOptions{
-								To: apps.Server,
+								To:    apps.Server,
+								Count: 1,
 								Port: echo.Port{
 									Name: port,
 								},
@@ -145,34 +137,23 @@ func TestTrustDomainValidation(t *testing.T) {
 									Cert: trustDomains[td].cert,
 									Key:  trustDomains[td].key,
 								},
-								Retry: echo.Retry{
-									NoRetry: true,
-								},
 							}
-							retry.UntilSuccessOrFail(t, func() error {
-								result := echo.CallResult{
-									From: from,
-									Opts: opt,
+							if port == passThrough {
+								// Manually make the request for pass through port.
+								opt = echo.CallOptions{
+									ToWorkload: server,
+									Port:       echo.Port{Name: tcpWL},
+									TLS: echo.TLS{
+										Cert: trustDomains[td].cert,
+										Key:  trustDomains[td].key,
+									},
+									Check: check.OK(),
 								}
-								var err error
-								if port == passThrough {
-									// Manually make the request for pass through port.
-									fromWorkload := from.WorkloadsOrFail(t)[0]
-									toWorkload := server.WorkloadsOrFail(t)[0]
-									result.Responses, err = fromWorkload.ForwardEcho(context.TODO(), &epb.ForwardEchoRequest{
-										Url:   fmt.Sprintf("tcp://%s", net.JoinHostPort(toWorkload.Address(), "9000")),
-										Count: 1,
-										Cert:  trustDomains[td].cert,
-										Key:   trustDomains[td].key,
-									})
-								} else {
-									result, err = from.Call(opt)
-								}
-								if allow {
-									return check.OK().Check(result, err)
-								}
-								return check.ErrorContains("tls: unknown certificate").Check(result, err)
-							}, retry.Delay(250*time.Millisecond), retry.Timeout(30*time.Second), retry.Converge(5))
+							}
+							if !allow {
+								opt.Check = check.ErrorContains("tls: unknown certificate")
+							}
+							from.CallOrFail(t, opt)
 						})
 					}
 

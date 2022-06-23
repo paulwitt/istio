@@ -70,9 +70,6 @@ func TestTrustDomainAliasSecureNaming(t *testing.T) {
 	framework.NewTest(t).
 		Features("security.peer.trust-domain-alias-secure-naming").
 		Run(func(t framework.TestContext) {
-			if t.AllClusters().IsMulticluster() {
-				t.Skip("https://github.com/istio/istio/issues/37307")
-			}
 			testNS := apps.Namespace
 
 			t.ConfigIstio().YAML(testNS.Name(), POLICY).ApplyOrFail(t)
@@ -88,7 +85,8 @@ func TestTrustDomainAliasSecureNaming(t *testing.T) {
 						t.NewSubTest(name).Run(func(t framework.TestContext) {
 							t.Helper()
 							opts := echo.CallOptions{
-								To: to,
+								To:    to,
+								Count: 1,
 								Port: echo.Port{
 									Name: "https",
 								},

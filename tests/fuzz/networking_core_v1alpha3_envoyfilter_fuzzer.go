@@ -15,7 +15,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// nolint: golint
 package envoyfilter
 
 import (
@@ -28,6 +27,10 @@ import (
 	"istio.io/istio/pilot/pkg/serviceregistry/memory"
 	"istio.io/istio/pkg/config/host"
 )
+
+func validProxy(p *model.Proxy) bool {
+	return len(p.IPAddresses) != 0
+}
 
 func InternalFuzzApplyClusterMerge(data []byte) int {
 	f := fuzz.NewConsumer(data)
@@ -54,7 +57,7 @@ func InternalFuzzApplyClusterMerge(data []byte) int {
 	if err != nil {
 		return 0
 	}
-	if !proxyValid(proxy) {
+	if !validProxy(proxy) {
 		return 0
 	}
 

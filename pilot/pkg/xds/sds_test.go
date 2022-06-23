@@ -114,7 +114,12 @@ func TestGenerate(t *testing.T) {
 			proxy:     &model.Proxy{VerifiedIdentity: &spiffe.Identity{Namespace: "istio-system"}},
 			resources: []string{"kubernetes://generic"},
 			request:   &model.PushRequest{Full: true},
-			expect:    map[string]Expected{},
+			expect: map[string]Expected{
+				"kubernetes://generic": {
+					Key:  string(genericCert.Data[credentials.GenericScrtKey]),
+					Cert: string(genericCert.Data[credentials.GenericScrtCert]),
+				},
+			},
 		},
 		{
 			name:      "unauthenticated",
@@ -276,7 +281,7 @@ func TestGenerate(t *testing.T) {
 			if tt.accessReviewResponse != nil {
 				cc.Fake.PrependReactor("create", "subjectaccessreviews", tt.accessReviewResponse)
 			} else {
-				credentials.DisableAuthorizationForTest(cc)
+				disableAuthorizationForSecret(cc)
 			}
 			cc.Fake.Unlock()
 
@@ -308,7 +313,7 @@ func TestCaching(t *testing.T) {
 		KubernetesObjects: []runtime.Object{genericCert},
 		KubeClientModifier: func(c kube.Client) {
 			cc := c.Kube().(*fake.Clientset)
-			credentials.DisableAuthorizationForTest(cc)
+			disableAuthorizationForSecret(cc)
 		},
 	})
 	gen := s.Discovery.Generators[v3.SecretType]

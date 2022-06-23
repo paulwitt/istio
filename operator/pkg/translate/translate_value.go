@@ -434,7 +434,9 @@ func translateHPASpec(inPath string, outPath string, valueTree map[string]interf
 - type: Resource
   resource:
     name: cpu
-    targetAverageUtilization: %f`
+    target:
+      type: Utilization
+      averageUtilization: %f`
 
 		rsString := fmt.Sprintf(rsVal, asVal)
 		if err = yaml.Unmarshal([]byte(rsString), &rs); err != nil {
@@ -548,7 +550,8 @@ func translateEnv(outPath string, value interface{}, cpSpecTree map[string]inter
 
 // translateK8sTree is internal method for translating K8s configurations from value.yaml tree.
 func (t *ReverseTranslator) translateK8sTree(valueTree map[string]interface{},
-	cpSpecTree map[string]interface{}, mapping map[string]*Translation) error {
+	cpSpecTree map[string]interface{}, mapping map[string]*Translation,
+) error {
 	for inPath, v := range mapping {
 		scope.Debugf("Checking for k8s path %s in helm Value.yaml tree", inPath)
 		path := util.PathFromString(inPath)
@@ -618,7 +621,8 @@ func (t *ReverseTranslator) translateK8sTree(valueTree map[string]interface{},
 
 // translateRemainingPaths translates remaining paths that are not available in existing mappings.
 func (t *ReverseTranslator) translateRemainingPaths(valueTree map[string]interface{},
-	cpSpecTree map[string]interface{}, path util.Path) error {
+	cpSpecTree map[string]interface{}, path util.Path,
+) error {
 	for key, val := range valueTree {
 		newPath := append(path, key)
 		// value set to nil means no translation needed or being translated already.
@@ -650,7 +654,8 @@ func (t *ReverseTranslator) translateRemainingPaths(valueTree map[string]interfa
 
 // translateAPI is internal method for translating value.yaml tree based on API mapping.
 func (t *ReverseTranslator) translateAPI(valueTree map[string]interface{},
-	cpSpecTree map[string]interface{}) error {
+	cpSpecTree map[string]interface{},
+) error {
 	for inPath, v := range t.APIMapping {
 		scope.Debugf("Checking for path %s in helm Value.yaml tree", inPath)
 		m, found, err := tpath.Find(valueTree, util.ToYAMLPath(inPath))

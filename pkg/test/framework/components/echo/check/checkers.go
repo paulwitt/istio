@@ -22,7 +22,9 @@ import (
 	"strings"
 
 	"github.com/hashicorp/go-multierror"
+	"google.golang.org/grpc/codes"
 
+	"istio.io/istio/pkg/config/protocol"
 	echoClient "istio.io/istio/pkg/test/echo"
 	"istio.io/istio/pkg/test/framework/components/cluster"
 	"istio.io/istio/pkg/test/framework/components/echo"
@@ -117,6 +119,24 @@ func ErrorContains(expected string) echo.Checker {
 	}
 }
 
+func ErrorOrStatus(expected int) echo.Checker {
+	expectedStr := ""
+	if expected > 0 {
+		expectedStr = strconv.Itoa(expected)
+	}
+	return func(resp echo.CallResult, err error) error {
+		if err != nil {
+			return nil
+		}
+		for _, r := range resp.Responses {
+			if r.Code != expectedStr {
+				return fmt.Errorf("expected response code `%s`, got %q", expectedStr, r.Code)
+			}
+		}
+		return nil
+	}
+}
+
 // OK is a shorthand for NoErrorAndStatus(200).
 func OK() echo.Checker {
 	return NoErrorAndStatus(http.StatusOK)
@@ -137,10 +157,52 @@ func Status(expected int) echo.Checker {
 	}
 	return Each(func(r echoClient.Response) error {
 		if r.Code != expectedStr {
-			return fmt.Errorf("expected response code `%s`, got %q", expectedStr, r.Code)
+			return fmt.Errorf("expected response code `%s`, got %q. Response: %s", expectedStr, r.Code, r)
 		}
 		return nil
 	})
+}
+
+// GRPCStatus checks that the gRPC response status code matches the expected value.
+func GRPCStatus(expected codes.Code) echo.Checker {
+	return func(result echo.CallResult, err error) error {
+		if expected == codes.OK {
+			if err != nil {
+				return fmt.Errorf("unexpected error: %w", err)
+			}
+			return nil
+		}
+		if err == nil {
+			return fmt.Errorf("expected gRPC error with status %s, but got OK", expected.String())
+		}
+		expectedSubstr := fmt.Sprintf("code = %s", expected.String())
+		if strings.Contains(err.Error(), expectedSubstr) {
+			return nil
+		}
+		return fmt.Errorf("expected gRPC response code %q. Instead got: %w", expected.String(), err)
+	}
+}
+
+// BodyContains checks that the response body contains the given string.
+func BodyContains(expected string) echo.Checker {
+	return Each(func(r echoClient.Response) error {
+		if !strings.Contains(r.RawContent, expected) {
+			return fmt.Errorf("want %q in body but not found: %s", expected, r.RawContent)
+		}
+		return nil
+	})
+}
+
+// Forbidden checks that the response indicates that the request was rejected by RBAC.
+func Forbidden(p protocol.Instance) echo.Checker {
+	switch {
+	case p.IsGRPC():
+		return ErrorContains("rpc error: code = PermissionDenied")
+	case p.IsTCP():
+		return ErrorContains("EOF")
+	default:
+		return NoErrorAndStatus(http.StatusForbidden)
+	}
 }
 
 // TooManyRequests checks that at least one message receives a StatusTooManyRequests status code.
@@ -184,21 +246,42 @@ func Alpn(expected string) echo.Checker {
 	})
 }
 
+func isHTTPProtocol(r echoClient.Response) bool {
+	return strings.HasPrefix(r.RequestURL, "http://") ||
+		strings.HasPrefix(r.RequestURL, "grpc://") ||
+		strings.HasPrefix(r.RequestURL, "ws://")
+}
+
+func isMTLS(r echoClient.Response) bool {
+	_, f1 := r.RequestHeaders["X-Forwarded-Client-Cert"]
+	// nolint: staticcheck
+	_, f2 := r.RequestHeaders["x-forwarded-client-cert"] // grpc has different casing
+	return f1 || f2
+}
+
 func MTLSForHTTP() echo.Checker {
 	return Each(func(r echoClient.Response) error {
-		if !strings.HasPrefix(r.RequestURL, "http://") &&
-			!strings.HasPrefix(r.RequestURL, "grpc://") &&
-			!strings.HasPrefix(r.RequestURL, "ws://") {
+		if !isHTTPProtocol(r) {
 			// Non-HTTP traffic. Fail open, we cannot check mTLS.
 			return nil
 		}
-		_, f1 := r.RequestHeaders["X-Forwarded-Client-Cert"]
-		// nolint: staticcheck
-		_, f2 := r.RequestHeaders["x-forwarded-client-cert"] // grpc has different casing
-		if f1 || f2 {
+		if isMTLS(r) {
 			return nil
 		}
 		return fmt.Errorf("expected X-Forwarded-Client-Cert but not found: %v", r)
+	})
+}
+
+func PlaintextForHTTP() echo.Checker {
+	return Each(func(r echoClient.Response) error {
+		if !isHTTPProtocol(r) {
+			// Non-HTTP traffic. Fail open, we cannot check mTLS.
+			return nil
+		}
+		if !isMTLS(r) {
+			return nil
+		}
+		return fmt.Errorf("expected plaintext but found X-Forwarded-Client-Cert header: %v", r)
 	})
 }
 
@@ -278,6 +361,15 @@ func URL(expected string) echo.Checker {
 	})
 }
 
+// ReachedTargetClusters is similar to ReachedClusters, except that the set of expected clusters is
+// retrieved from the Target of the request.
+func ReachedTargetClusters(allClusters cluster.Clusters) echo.Checker {
+	return func(result echo.CallResult, err error) error {
+		expectedByNetwork := result.Opts.To.Clusters().ByNetwork()
+		return checkReachedClusters(result, allClusters, expectedByNetwork)
+	}
+}
+
 // ReachedClusters returns an error if requests did not load balance as expected.
 //
 // For cases where all clusters are on the same network, verifies that each of the expected clusters was reached.
@@ -287,81 +379,100 @@ func URL(expected string) echo.Checker {
 // client were reached.
 func ReachedClusters(allClusters cluster.Clusters, expectedClusters cluster.Clusters) echo.Checker {
 	expectedByNetwork := expectedClusters.ByNetwork()
-	return And(
-		reachedNetworks(allClusters, expectedByNetwork),
-		reachedClustersInNetwork(allClusters, expectedByNetwork))
-}
-
-func reachedNetworks(allClusters cluster.Clusters, expectedByNetwork cluster.ClustersByNetwork) echo.Checker {
-	return func(result echo.CallResult, _ error) error {
-		// Gather the networks that were reached.
-		networkHits := make(map[string]int)
-		for _, rr := range result.Responses {
-			c := allClusters.GetByName(rr.Cluster)
-			if c != nil {
-				networkHits[c.NetworkName()]++
-			}
-		}
-
-		// Verify that all expected networks were reached.
-		for network := range expectedByNetwork {
-			if networkHits[network] == 0 {
-				return fmt.Errorf("did not reach network %v, got %v", network, networkHits)
-			}
-		}
-
-		// Verify that no unexpected networks were reached.
-		for network := range networkHits {
-			if expectedByNetwork[network] == nil {
-				return fmt.Errorf("reached network not in %v, got %v", expectedByNetwork.Networks(), networkHits)
-			}
-		}
-		return nil
+	return func(result echo.CallResult, err error) error {
+		return checkReachedClusters(result, allClusters, expectedByNetwork)
 	}
 }
 
-func reachedClustersInNetwork(allClusters cluster.Clusters, expectedByNetwork cluster.ClustersByNetwork) echo.Checker {
-	return func(result echo.CallResult, _ error) error {
-		// Determine the source network of the caller.
-		var sourceNetwork string
-		switch from := result.From.(type) {
-		case echo.Instance:
-			sourceNetwork = from.Config().Cluster.NetworkName()
-		case ingress.Instance:
-			sourceNetwork = from.Cluster().NetworkName()
-		default:
-			// Unable to determine the source network of the caller. Skip this check.
-			return nil
+// ReachedNetworks returns an error if requests did not load balance across the clusters in the expected
+// networks.
+func ReachedNetworks(allClusters cluster.Clusters, expectedNetworks ...string) echo.Checker {
+	allByNetwork := allClusters.ByNetwork()
+
+	// Populate a map containing just the expected clusters.
+	expectedByNetwork := make(map[string]cluster.Clusters)
+	for _, nw := range expectedNetworks {
+		expectedByNetwork[nw] = allByNetwork[nw]
+	}
+
+	return func(result echo.CallResult, err error) error {
+		return checkReachedClusters(result, allClusters, expectedByNetwork)
+	}
+}
+
+func checkReachedClusters(result echo.CallResult, allClusters cluster.Clusters, expectedByNetwork cluster.ClustersByNetwork) error {
+	if err := checkReachedNetworks(result, allClusters, expectedByNetwork); err != nil {
+		return err
+	}
+	return checkReachedClustersInNetwork(result, allClusters, expectedByNetwork)
+}
+
+func checkReachedNetworks(result echo.CallResult, allClusters cluster.Clusters, expectedByNetwork cluster.ClustersByNetwork) error {
+	// Gather the networks that were reached.
+	networkHits := make(map[string]int)
+	for _, rr := range result.Responses {
+		c := allClusters.GetByName(rr.Cluster)
+		if c != nil {
+			networkHits[c.NetworkName()]++
 		}
+	}
 
-		// Lookup only the expected clusters in the same network as the caller.
-		expectedClustersInSourceNetwork := expectedByNetwork[sourceNetwork]
-
-		clusterHits := make(map[string]int)
-		for _, rr := range result.Responses {
-			clusterHits[rr.Cluster]++
+	// Verify that all expected networks were reached.
+	for network := range expectedByNetwork {
+		if networkHits[network] == 0 {
+			return fmt.Errorf("did not reach network %v, got %v", network, networkHits)
 		}
+	}
 
-		for _, c := range expectedClustersInSourceNetwork {
-			if clusterHits[c.Name()] == 0 {
-				return fmt.Errorf("did not reach all of %v in source network %v, got %v",
-					expectedClustersInSourceNetwork, sourceNetwork, clusterHits)
-			}
+	// Verify that no unexpected networks were reached.
+	for network := range networkHits {
+		if expectedByNetwork[network] == nil {
+			return fmt.Errorf("reached network not in %v, got %v", expectedByNetwork.Networks(), networkHits)
 		}
+	}
+	return nil
+}
 
-		// Verify that no unexpected clusters were reached.
-		for clusterName := range clusterHits {
-			reachedCluster := allClusters.GetByName(clusterName)
-			if reachedCluster == nil || reachedCluster.NetworkName() != sourceNetwork {
-				// Ignore clusters on a different network from the source.
-				continue
-			}
-
-			if expectedClustersInSourceNetwork.GetByName(clusterName) == nil {
-				return fmt.Errorf("reached cluster %v in source network %v not in %v, got %v",
-					clusterName, sourceNetwork, expectedClustersInSourceNetwork, clusterHits)
-			}
-		}
+func checkReachedClustersInNetwork(result echo.CallResult, allClusters cluster.Clusters, expectedByNetwork cluster.ClustersByNetwork) error {
+	// Determine the source network of the caller.
+	var sourceNetwork string
+	switch from := result.From.(type) {
+	case echo.Instance:
+		sourceNetwork = from.Config().Cluster.NetworkName()
+	case ingress.Instance:
+		sourceNetwork = from.Cluster().NetworkName()
+	default:
+		// Unable to determine the source network of the caller. Skip this check.
 		return nil
 	}
+
+	// Lookup only the expected clusters in the same network as the caller.
+	expectedClustersInSourceNetwork := expectedByNetwork[sourceNetwork]
+
+	clusterHits := make(map[string]int)
+	for _, rr := range result.Responses {
+		clusterHits[rr.Cluster]++
+	}
+
+	for _, c := range expectedClustersInSourceNetwork {
+		if clusterHits[c.Name()] == 0 {
+			return fmt.Errorf("did not reach all of %v in source network %v, got %v",
+				expectedClustersInSourceNetwork, sourceNetwork, clusterHits)
+		}
+	}
+
+	// Verify that no unexpected clusters were reached.
+	for clusterName := range clusterHits {
+		reachedCluster := allClusters.GetByName(clusterName)
+		if reachedCluster == nil || reachedCluster.NetworkName() != sourceNetwork {
+			// Ignore clusters on a different network from the source.
+			continue
+		}
+
+		if expectedClustersInSourceNetwork.GetByName(clusterName) == nil {
+			return fmt.Errorf("reached cluster %v in source network %v not in %v, got %v",
+				clusterName, sourceNetwork, expectedClustersInSourceNetwork, clusterHits)
+		}
+	}
+	return nil
 }

@@ -196,7 +196,7 @@ type ADSC struct {
 	Mesh *v1alpha1.MeshConfig
 
 	// Retrieved configurations can be stored using the common istio model interface.
-	Store model.IstioConfigStore
+	Store model.ConfigStore
 
 	// Retrieved endpoints can be stored in the memory registry. This is used for CDS and EDS responses.
 	Registry *memory.ServiceDiscovery
@@ -293,7 +293,7 @@ func New(discoveryAddr string, opts *Config) (*ADSC, error) {
 	adsc.Locality = opts.Locality
 
 	adsc.nodeID = fmt.Sprintf("%s~%s~%s.%s~%s.svc.%s", opts.NodeType, opts.IP,
-		opts.Workload, opts.Namespace, opts.Namespace, constants.DefaultKubernetesDomain)
+		opts.Workload, opts.Namespace, opts.Namespace, constants.DefaultClusterLocalDomain)
 
 	if err := adsc.Dial(); err != nil {
 		return nil, err
@@ -710,7 +710,7 @@ func (a *ADSC) Save(base string) error {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
-	// guarrante the persistence order for each element in tcpListeners
+	// guarantee the persistence order for each element in tcpListeners
 	var sortTCPListeners []string
 	for key := range a.tcpListeners {
 		sortTCPListeners = append(sortTCPListeners, key)
@@ -730,7 +730,7 @@ func (a *ADSC) Save(base string) error {
 		return err
 	}
 
-	// guarrante the persistence order for each element in httpListeners
+	// guarantee the persistence order for each element in httpListeners
 	var sortHTTPListeners []string
 	for key := range a.httpListeners {
 		sortHTTPListeners = append(sortHTTPListeners, key)
@@ -750,7 +750,7 @@ func (a *ADSC) Save(base string) error {
 		return err
 	}
 
-	// guarrante the persistence order for each element in routes
+	// guarantee the persistence order for each element in routes
 	var sortRoutes []string
 	for key := range a.routes {
 		sortRoutes = append(sortRoutes, key)
@@ -770,7 +770,7 @@ func (a *ADSC) Save(base string) error {
 		return err
 	}
 
-	// guarrante the persistence order for each element in edsClusters
+	// guarantee the persistence order for each element in edsClusters
 	var sortEdsClusters []string
 	for key := range a.edsClusters {
 		sortEdsClusters = append(sortEdsClusters, key)
@@ -790,7 +790,7 @@ func (a *ADSC) Save(base string) error {
 		return err
 	}
 
-	// guarrante the persistence order for each element in clusters
+	// guarantee the persistence order for each element in clusters
 	var sortClusters []string
 	for key := range a.clusters {
 		sortClusters = append(sortClusters, key)
@@ -810,7 +810,7 @@ func (a *ADSC) Save(base string) error {
 		return err
 	}
 
-	// guarrante the persistence order for each element in eds
+	// guarantee the persistence order for each element in eds
 	var sortEds []string
 	for key := range a.eds {
 		sortEds = append(sortEds, key)

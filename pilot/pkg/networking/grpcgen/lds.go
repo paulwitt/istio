@@ -30,6 +30,7 @@ import (
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
 
+	"istio.io/api/label"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/util"
 	"istio.io/istio/pilot/pkg/security/authn"
@@ -121,6 +122,12 @@ func buildInboundListeners(node *model.Proxy, push *model.PushContext, names []s
 func buildInboundFilterChains(node *model.Proxy, push *model.PushContext, si *model.ServiceInstance, applier authn.PolicyApplier) []*listener.FilterChain {
 	mode := applier.GetMutualTLSModeForPort(si.Endpoint.EndpointPort)
 
+	// auto-mtls label is set - clients will attempt to connect using mtls, and
+	// gRPC doesn't support permissive.
+	if node.Metadata.Labels[label.SecurityTlsMode.Name] == "istio" && mode == model.MTLSPermissive {
+		mode = model.MTLSStrict
+	}
+
 	var tlsContext *tls.DownstreamTlsContext
 	if mode != model.MTLSDisable && mode != model.MTLSUnknown {
 		tlsContext = &tls.DownstreamTlsContext{
@@ -139,7 +146,8 @@ func buildInboundFilterChains(node *model.Proxy, push *model.PushContext, si *mo
 	if mode == model.MTLSPermissive {
 		// TODO gRPC's filter chain match is super limted - only effective transport_protocol match is "raw_buffer"
 		// see https://github.com/grpc/proposal/blob/master/A36-xds-for-servers.md for detail
-		log.Warnf("cannot support PERMISSIVE mode for %s on %s; defaulting to DISABLE", si.Service.Hostname, node.ID)
+		// No need to warn on each push - the behavior is still consistent with auto-mtls, which is the
+		// replacement for permissive.
 		mode = model.MTLSDisable
 	}
 
@@ -228,18 +236,16 @@ func buildInboundFilterChain(node *model.Proxy, push *model.PushContext, nameSuf
 //
 // See: xds/interal/httpfilter/rbac
 //
-//
 // TODO: gRPC also supports 'per route override' - not yet clear how to use it, Istio uses path expressions instead and we don't generate
 // vhosts or routes for the inbound listener.
 //
 // For gateways it would make a lot of sense to use this concept, same for moving path prefix at top level ( more scalable, easier for users)
 // This should probably be done for the v2 API.
 //
-//
-//
 // nolint: unparam
 func buildRBAC(node *model.Proxy, push *model.PushContext, suffix string, context *tls.DownstreamTlsContext,
-	a rbacpb.RBAC_Action, policies []model.AuthorizationPolicy) *rbacpb.RBAC {
+	a rbacpb.RBAC_Action, policies []model.AuthorizationPolicy,
+) *rbacpb.RBAC {
 	rules := &rbacpb.RBAC{
 		Action:   a,
 		Policies: map[string]*rbacpb.Policy{},

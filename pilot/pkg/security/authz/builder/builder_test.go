@@ -100,8 +100,9 @@ var (
 							AllowPartialMessage: true,
 							PackAsBytes:         true,
 						},
-						HeadersToUpstreamOnAllow:  []string{"Authorization", "x-prefix-*", "*-suffix"},
-						HeadersToDownstreamOnDeny: []string{"Set-cookie", "x-prefix-*", "*-suffix"},
+						HeadersToUpstreamOnAllow:   []string{"Authorization", "x-prefix-*", "*-suffix"},
+						HeadersToDownstreamOnDeny:  []string{"Set-cookie", "x-prefix-*", "*-suffix"},
+						HeadersToDownstreamOnAllow: []string{"Set-cookie", "x-prefix-*", "*-suffix"},
 					},
 				},
 			},
@@ -258,7 +259,8 @@ func TestGenerator_GenerateHTTP(t *testing.T) {
 			}
 			in := inputParams(t, baseDir+tc.input, tc.meshConfig, tc.version)
 			defer option.Logger.Report(in)
-			g := New(tc.tdBundle, in, option)
+			policies := in.Push.AuthzPolicies.ListAuthorizationPolicies(in.Node.ConfigNamespace, in.Node.Metadata.Labels)
+			g := New(tc.tdBundle, in.Push, policies, option)
 			if g == nil {
 				t.Fatalf("failed to create generator")
 			}
@@ -324,7 +326,8 @@ func TestGenerator_GenerateTCP(t *testing.T) {
 			}
 			in := inputParams(t, baseDir+tc.input, tc.meshConfig, nil)
 			defer option.Logger.Report(in)
-			g := New(tc.tdBundle, in, option)
+			policies := in.Push.AuthzPolicies.ListAuthorizationPolicies(in.Node.ConfigNamespace, in.Node.Metadata.Labels)
+			g := New(tc.tdBundle, in.Push, policies, option)
 			if g == nil {
 				t.Fatalf("failed to create generator")
 			}
@@ -423,7 +426,7 @@ func newAuthzPolicies(t *testing.T, policies []*config.Config) *model.Authorizat
 	}
 
 	authzPolicies, err := model.GetAuthorizationPolicies(&model.Environment{
-		IstioConfigStore: store,
+		ConfigStore: store,
 	})
 	if err != nil {
 		t.Fatalf("newAuthzPolicies: %v", err)

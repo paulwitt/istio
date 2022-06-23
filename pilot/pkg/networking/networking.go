@@ -46,7 +46,8 @@ const (
 
 // ModelProtocolToListenerProtocol converts from a config.Protocol to its corresponding plugin.ListenerProtocol
 func ModelProtocolToListenerProtocol(p protocol.Instance,
-	trafficDirection core.TrafficDirection) ListenerProtocol {
+	trafficDirection core.TrafficDirection,
+) ListenerProtocol {
 	switch p {
 	case protocol.HTTP, protocol.HTTP2, protocol.HTTP_PROXY, protocol.GRPC, protocol.GRPCWeb:
 		return ListenerProtocolHTTP
@@ -125,6 +126,7 @@ type FilterChain struct {
 // Any lists should not be overridden, but rather only appended to.
 // Non-list fields may be mutated; however it's not recommended to do this since it can affect other plugins in the
 // chain in unpredictable ways.
+// TODO: do we need this now?
 type MutableObjects struct {
 	// Listener is the listener being built. Must be initialized before Plugin methods are called.
 	Listener *listener.Listener

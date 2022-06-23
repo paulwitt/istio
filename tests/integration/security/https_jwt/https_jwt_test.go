@@ -30,6 +30,7 @@ import (
 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
 	"istio.io/istio/pkg/test/framework/components/istio"
 	"istio.io/istio/pkg/test/framework/resource"
+	"istio.io/istio/pkg/test/framework/resource/config/apply"
 	"istio.io/istio/pkg/test/kube"
 	"istio.io/istio/tests/common/jwt"
 	"istio.io/istio/tests/integration/security/util"
@@ -43,19 +44,17 @@ func TestJWTHTTPS(t *testing.T) {
 	framework.NewTest(t).
 		Features("security.authentication.jwt").
 		Run(func(t framework.TestContext) {
-			if t.Clusters().IsMulticluster() {
-				t.Skip("https://github.com/istio/istio/issues/37307")
-			}
-
 			ns := apps.Namespace1
 			istioSystemNS := istio.ClaimSystemNamespaceOrFail(t, t)
 
-			t.ConfigKube().EvalFile(istioSystemNS.Name(), map[string]string{
-				"Namespace": istioSystemNS.Name(),
-			}, filepath.Join(env.IstioSrc, "samples/jwt-server", "jwt-server.yaml")).ApplyOrFail(t)
+			for _, cluster := range t.AllClusters() {
+				t.ConfigKube(cluster).EvalFile(istioSystemNS.Name(), map[string]string{
+					"Namespace": istioSystemNS.Name(),
+				}, filepath.Join(env.IstioSrc, "samples/jwt-server", "jwt-server.yaml")).ApplyOrFail(t)
+			}
 
 			for _, cluster := range t.AllClusters() {
-				fetchFn := kube.NewSinglePodFetch(cluster, istioSystemNS.Name(), "app=jwt-server")
+				fetchFn := kube.NewPodFetch(cluster, istioSystemNS.Name(), "app=jwt-server")
 				_, err := kube.WaitUntilPodsAreReady(fetchFn)
 				if err != nil {
 					t.Fatalf("pod is not getting ready : %v", err)
@@ -63,7 +62,7 @@ func TestJWTHTTPS(t *testing.T) {
 			}
 
 			for _, cluster := range t.AllClusters() {
-				if _, _, err := kube.WaitUntilServiceEndpointsAreReady(cluster, istioSystemNS.Name(), "jwt-server"); err != nil {
+				if _, _, err := kube.WaitUntilServiceEndpointsAreReady(cluster.Kube(), istioSystemNS.Name(), "jwt-server"); err != nil {
 					t.Fatalf("Wait for jwt-server server failed: %v", err)
 				}
 			}
@@ -98,8 +97,7 @@ func TestJWTHTTPS(t *testing.T) {
 								"Namespace": ns.Name(),
 								"dst":       to.Config().Service,
 							}
-							return t.ConfigIstio().EvalFile(ns.Name(), args, c.policyFile).
-								Apply(resource.Wait)
+							return t.ConfigIstio().EvalFile(ns.Name(), args, c.policyFile).Apply(apply.Wait)
 						}).
 						FromMatch(
 							// TODO(JimmyCYJ): enable VM for all test cases.
@@ -112,7 +110,6 @@ func TestJWTHTTPS(t *testing.T) {
 								Port: echo.Port{
 									Name: "http",
 								},
-								Count: util.CallsPerCluster * to.WorkloadsOrFail(t).Len(),
 							}
 
 							c.customizeCall(t, from, &opts)

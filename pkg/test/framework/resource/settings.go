@@ -150,6 +150,15 @@ type Settings struct {
 
 	// Image settings
 	Image ImageSettings
+
+	// EchoImage is the app image to be used by echo deployments.
+	EchoImage string
+
+	// CustomGRPCEchoImage if specified will run an extra container in the echo Pods responsible for gRPC ports
+	CustomGRPCEchoImage string
+
+	// MaxDumps is the maximum number of full test dumps that are allowed to occur within a test suite.
+	MaxDumps uint64
 }
 
 func (s Settings) Skip(class string) bool {
@@ -183,7 +192,8 @@ func (s *Settings) Clone() *Settings {
 // DefaultSettings returns a default settings instance.
 func DefaultSettings() *Settings {
 	return &Settings{
-		RunID: uuid.New(),
+		RunID:    uuid.New(),
+		MaxDumps: 10,
 	}
 }
 
@@ -208,6 +218,7 @@ func (s *Settings) String() string {
 	result += fmt.Sprintf("Tag:               %s\n", s.Image.Tag)
 	result += fmt.Sprintf("PullPolicy:        %s\n", s.Image.PullPolicy)
 	result += fmt.Sprintf("PullSecret:        %s\n", s.Image.PullSecret)
+	result += fmt.Sprintf("MaxDumps:          %d\n", s.MaxDumps)
 	return result
 }
 

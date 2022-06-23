@@ -60,14 +60,11 @@ func (sr SecretResource) Cacheable() bool {
 	return true
 }
 
-func sdsNeedsPush(proxy *model.Proxy, updates model.XdsUpdates) bool {
-	if proxy.Type != model.Router {
-		return false
-	}
+func sdsNeedsPush(updates model.XdsUpdates) bool {
 	if len(updates) == 0 {
 		return true
 	}
-	if len(model.ConfigNamesOfKind(updates, gvk.Secret)) > 0 {
+	if model.ConfigsHaveKind(updates, gvk.Secret) || model.ConfigsHaveKind(updates, gvk.ReferencePolicy) {
 		return true
 	}
 	return false
@@ -94,7 +91,7 @@ func (s *SecretGen) Generate(proxy *model.Proxy, w *model.WatchedResource, req *
 		log.Warnf("proxy %s is not authorized to receive credscontroller. Ensure you are connecting over TLS port and are authenticated.", proxy.ID)
 		return nil, model.DefaultXdsLogDetails, nil
 	}
-	if req == nil || !sdsNeedsPush(proxy, req.ConfigsUpdated) {
+	if req == nil || !sdsNeedsPush(req.ConfigsUpdated) {
 		return nil, model.DefaultXdsLogDetails, nil
 	}
 	var updatedSecrets map[model.ConfigKey]struct{}
@@ -404,7 +401,8 @@ type SecretGen struct {
 var _ model.XdsResourceGenerator = &SecretGen{}
 
 func NewSecretGen(sc credscontroller.MulticlusterController, cache model.XdsCache, configCluster cluster.ID,
-	meshConfig *mesh.MeshConfig) *SecretGen {
+	meshConfig *mesh.MeshConfig,
+) *SecretGen {
 	// TODO: Currently we only have a single credentials controller (Kubernetes). In the future, we will need a mapping
 	// of resource type to secret controller (ie kubernetes:// -> KubernetesController, vault:// -> VaultController)
 	return &SecretGen{

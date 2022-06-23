@@ -18,18 +18,23 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
+	"google.golang.org/protobuf/types/known/structpb"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/cluster"
 	"istio.io/istio/pkg/test/framework/components/environment/kube"
 	"istio.io/istio/pkg/test/framework/resource"
+	"istio.io/istio/pkg/test/framework/resource/config/cleanup"
 	"istio.io/istio/pkg/test/scopes"
 	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/istio/pkg/util/protomarshal"
@@ -95,7 +100,8 @@ func (i *operatorComponent) RemoteDiscoveryAddressFor(cluster cluster.Cluster) (
 		}
 		addr = address.(net.TCPAddr)
 	} else {
-		addr = i.CustomIngressFor(primary, eastWestIngressServiceName, eastWestIngressIstioLabel).DiscoveryAddress()
+		name := types.NamespacedName{Name: eastWestIngressServiceName, Namespace: i.settings.SystemNamespace}
+		addr = i.CustomIngressFor(primary, name, eastWestIngressIstioLabel).DiscoveryAddress()
 	}
 	if addr.IP.String() == "<nil>" {
 		return net.TCPAddr{}, fmt.Errorf("failed to get ingress IP for %s", primary.Name())
@@ -104,9 +110,10 @@ func (i *operatorComponent) RemoteDiscoveryAddressFor(cluster cluster.Cluster) (
 }
 
 func getRemoteServiceAddress(s *kube.Settings, cluster cluster.Cluster, ns, label, svcName string,
-	port int) (interface{}, bool, error) {
+	port int,
+) (interface{}, bool, error) {
 	if !s.LoadBalancerSupported {
-		pods, err := cluster.PodsForSelector(context.TODO(), ns, fmt.Sprintf("istio=%s", label))
+		pods, err := cluster.PodsForSelector(context.TODO(), ns, label)
 		if err != nil {
 			return nil, false, err
 		}
@@ -126,7 +133,7 @@ func getRemoteServiceAddress(s *kube.Settings, cluster cluster.Cluster, ns, labe
 			return nil, false, fmt.Errorf("no Host IP available on the remote service node yet")
 		}
 
-		svc, err := cluster.CoreV1().Services(ns).Get(context.TODO(), svcName, v1.GetOptions{})
+		svc, err := cluster.Kube().CoreV1().Services(ns).Get(context.TODO(), svcName, v1.GetOptions{})
 		if err != nil {
 			return nil, false, err
 		}
@@ -150,7 +157,7 @@ func getRemoteServiceAddress(s *kube.Settings, cluster cluster.Cluster, ns, labe
 	}
 
 	// Otherwise, get the load balancer IP.
-	svc, err := cluster.CoreV1().Services(ns).Get(context.TODO(), svcName, v1.GetOptions{})
+	svc, err := cluster.Kube().CoreV1().Services(ns).Get(context.TODO(), svcName, v1.GetOptions{})
 	if err != nil {
 		return nil, false, err
 	}
@@ -169,15 +176,17 @@ func getRemoteServiceAddress(s *kube.Settings, cluster cluster.Cluster, ns, labe
 }
 
 func (i *operatorComponent) isExternalControlPlane() bool {
-	for _, cluster := range i.ctx.AllClusters() {
-		if cluster.IsPrimary() && !cluster.IsConfig() {
+	for _, c := range i.ctx.AllClusters() {
+		if c.IsPrimary() && !c.IsConfig() {
 			return true
 		}
 	}
 	return false
 }
 
-func PatchMeshConfig(t framework.TestContext, ns string, clusters cluster.Clusters, patch string) {
+func UpdateMeshConfig(t resource.Context, ns string, clusters cluster.Clusters,
+	update func(*meshconfig.MeshConfig) error, cleanupStrategy cleanup.Strategy,
+) error {
 	errG := multierror.Group{}
 	origCfg := map[string]string{}
 	mu := sync.RWMutex{}
@@ -189,10 +198,13 @@ func PatchMeshConfig(t framework.TestContext, ns string, clusters cluster.Cluste
 	for _, c := range clusters.Kube() {
 		c := c
 		errG.Go(func() error {
-			cm, err := c.CoreV1().ConfigMaps(ns).Get(context.TODO(), cmName, v1.GetOptions{})
+			// Read the config map from the cluster.
+			cm, err := c.Kube().CoreV1().ConfigMaps(ns).Get(context.TODO(), cmName, v1.GetOptions{})
 			if err != nil {
 				return err
 			}
+
+			// Get the MeshConfig yaml from the config map.
 			mcYaml, ok := cm.Data["mesh"]
 			if !ok {
 				return fmt.Errorf("mesh config was missing in istio config map for %s", c.Name())
@@ -200,18 +212,26 @@ func PatchMeshConfig(t framework.TestContext, ns string, clusters cluster.Cluste
 			mu.Lock()
 			origCfg[c.Name()] = cm.Data["mesh"]
 			mu.Unlock()
+
+			// Parse the YAML.
 			mc := &meshconfig.MeshConfig{}
 			if err := protomarshal.ApplyYAML(mcYaml, mc); err != nil {
 				return err
 			}
-			if err := protomarshal.ApplyYAML(patch, mc); err != nil {
+
+			// Apply the change.
+			if err := update(mc); err != nil {
 				return err
 			}
+
+			// Store the updated MeshConfig back into the config map.
 			cm.Data["mesh"], err = protomarshal.ToYAML(mc)
 			if err != nil {
 				return err
 			}
-			_, err = c.CoreV1().ConfigMaps(ns).Update(context.TODO(), cm, v1.UpdateOptions{})
+
+			// Write the config map back to the cluster.
+			_, err = c.Kube().CoreV1().ConfigMaps(ns).Update(context.TODO(), cm, v1.UpdateOptions{})
 			if err != nil {
 				return err
 			}
@@ -219,7 +239,9 @@ func PatchMeshConfig(t framework.TestContext, ns string, clusters cluster.Cluste
 			return nil
 		})
 	}
-	t.Cleanup(func() {
+
+	// Restore the original value of the MeshConfig when the context completes.
+	t.CleanupStrategy(cleanupStrategy, func() {
 		errG := multierror.Group{}
 		mu.RLock()
 		defer mu.RUnlock()
@@ -227,12 +249,12 @@ func PatchMeshConfig(t framework.TestContext, ns string, clusters cluster.Cluste
 			cn, mcYaml := cn, mcYaml
 			c := clusters.GetByName(cn)
 			errG.Go(func() error {
-				cm, err := c.CoreV1().ConfigMaps(ns).Get(context.TODO(), cmName, v1.GetOptions{})
+				cm, err := c.Kube().CoreV1().ConfigMaps(ns).Get(context.TODO(), cmName, v1.GetOptions{})
 				if err != nil {
 					return err
 				}
 				cm.Data["mesh"] = mcYaml
-				_, err = c.CoreV1().ConfigMaps(ns).Update(context.TODO(), cm, v1.UpdateOptions{})
+				_, err = c.Kube().CoreV1().ConfigMaps(ns).Update(context.TODO(), cm, v1.UpdateOptions{})
 				return err
 			})
 		}
@@ -240,7 +262,63 @@ func PatchMeshConfig(t framework.TestContext, ns string, clusters cluster.Cluste
 			scopes.Framework.Errorf("failed cleaning up cluster-local config: %v", err)
 		}
 	})
-	if err := errG.Wait().ErrorOrNil(); err != nil {
+	return errG.Wait().ErrorOrNil()
+}
+
+func UpdateMeshConfigOrFail(t framework.TestContext, ns string, clusters cluster.Clusters,
+	update func(*meshconfig.MeshConfig) error, cleanupStrategy cleanup.Strategy,
+) {
+	t.Helper()
+	if err := UpdateMeshConfig(t, ns, clusters, update, cleanupStrategy); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func PatchMeshConfig(t resource.Context, ns string, clusters cluster.Clusters, patch string) error {
+	return UpdateMeshConfig(t, ns, clusters, func(mc *meshconfig.MeshConfig) error {
+		return protomarshal.ApplyYAML(patch, mc)
+	}, cleanup.Always)
+}
+
+func PatchMeshConfigOrFail(t framework.TestContext, ns string, clusters cluster.Clusters, patch string) {
+	t.Helper()
+	if err := PatchMeshConfig(t, ns, clusters, patch); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// This regular expression matches list object index selection expression such as
+// abc[100], Tba_a[0].
+var listObjRex = regexp.MustCompile(`^([a-zA-Z]?[a-z_A-Z\d]*)\[([ ]*[\d]+)[ ]*\]$`)
+
+func getConfigValue(path []string, val map[string]*structpb.Value) *structpb.Value {
+	retVal := structpb.NewNullValue()
+	if len(path) > 0 {
+		match := listObjRex.FindStringSubmatch(path[0])
+		// valid list index
+		switch len(match) {
+		case 0: // does not match list object selection, should be name of a field, should be struct value
+			thisVal := val[path[0]]
+			// If it is a struct and looking for more down the path
+			if thisVal.GetStructValue() != nil && len(path) > 1 {
+				return getConfigValue(path[1:], thisVal.GetStructValue().Fields)
+			}
+			retVal = thisVal
+		case 3: // match somthing like aaa[100]
+			thisVal := val[match[1]]
+			// If it is a list and looking for more down the path
+			if thisVal.GetListValue() != nil && len(path) > 1 {
+				index, _ := strconv.Atoi(match[2])
+				return getConfigValue(path[1:], thisVal.GetListValue().Values[index].GetStructValue().Fields)
+			}
+			retVal = thisVal
+		}
+	}
+	return retVal
+}
+
+// This is method is to get a structpb value from a structpb map by
+// using a dotted path such as `pilot.env.LOCAL_CLUSTER_SECRET_WATCHER`.
+func GetConfigValue(path string, val map[string]*structpb.Value) *structpb.Value {
+	return getConfigValue(strings.Split(path, "."), val)
 }

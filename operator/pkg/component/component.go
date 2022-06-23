@@ -22,6 +22,7 @@ package component
 import (
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/version"
 	"sigs.k8s.io/yaml"
 
 	"istio.io/api/operator/v1alpha1"
@@ -53,6 +54,8 @@ type Options struct {
 	Namespace string
 	// Filter is the filenames to render
 	Filter sets.Set
+	// Version is the Kubernetes version information.
+	Version *version.Info
 }
 
 // IstioComponent defines the interface for a component.
@@ -65,7 +68,7 @@ type IstioComponent interface {
 	Namespace() string
 	// Enabled reports whether the component is enabled.
 	Enabled() bool
-	// Run starts the component. Must me called before the component is used.
+	// Run starts the component. Must be called before the component is used.
 	Run() error
 	// RenderManifest returns a string with the rendered manifest for the component.
 	RenderManifest() (string, error)
@@ -478,7 +481,7 @@ func createHelmRenderer(c *CommonComponentFields) helm.TemplateRenderer {
 	iop := c.InstallSpec
 	cns := string(c.ComponentName)
 	helmSubdir := c.Translator.ComponentMap(cns).HelmSubdir
-	return helm.NewHelmRenderer(iop.InstallPackagePath, helmSubdir, cns, c.Namespace)
+	return helm.NewHelmRenderer(iop.InstallPackagePath, helmSubdir, cns, c.Namespace, c.Version)
 }
 
 func isCoreComponentEnabled(c *CommonComponentFields) bool {

@@ -63,8 +63,6 @@ func (ht hostType) String() string {
 const (
 	hostTypeClusterLocal    hostType = "cluster.local"
 	hostTypeClusterSetLocal hostType = "clusterset.local"
-
-	requestCountMultiplier = 20
 )
 
 var (
@@ -81,6 +79,7 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// nolint: staticcheck
 	framework.
 		NewSuite(m).
 		Label(label.CustomSetup).
@@ -204,7 +203,8 @@ values:
 
 func runForAllClusterCombinations(
 	t framework.TestContext,
-	fn func(t framework.TestContext, from echo.Instance, to echo.Target)) {
+	fn func(t framework.TestContext, from echo.Instance, to echo.Target),
+) {
 	t.Helper()
 	echotest.New(t, echos.Instances).
 		WithDefaultFilters().
@@ -257,7 +257,6 @@ func callAndValidate(t framework.TestContext, ht hostType, from echo.Instance, t
 	_, err := from.Call(echo.CallOptions{
 		Address: address,
 		To:      to,
-		Count:   requestCountMultiplier * to.WorkloadsOrFail(t).Len(),
 		Port: echo.Port{
 			Name: "http",
 		},
@@ -470,7 +469,7 @@ func createAndCleanupServiceExport(t framework.TestContext, service string, expo
 // service B in the given cluster.
 func genClusterSetIPService(c cluster.Cluster) (*kubeCore.Service, error) {
 	// Get the definition for service B, so we can get the ports.
-	svc, err := c.CoreV1().Services(echos.Namespace.Name()).Get(context.TODO(), common.ServiceB, kubeMeta.GetOptions{})
+	svc, err := c.Kube().CoreV1().Services(echos.Namespace.Name()).Get(context.TODO(), common.ServiceB, kubeMeta.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -492,7 +491,7 @@ func genClusterSetIPService(c cluster.Cluster) (*kubeCore.Service, error) {
 	}
 
 	ns := echos.Namespace.Name()
-	if _, err := c.CoreV1().Services(ns).Create(context.TODO(), dummySvc, kubeMeta.CreateOptions{}); err != nil && !kerrors.IsAlreadyExists(err) {
+	if _, err := c.Kube().CoreV1().Services(ns).Create(context.TODO(), dummySvc, kubeMeta.CreateOptions{}); err != nil && !kerrors.IsAlreadyExists(err) {
 		return nil, err
 	}
 
@@ -500,7 +499,7 @@ func genClusterSetIPService(c cluster.Cluster) (*kubeCore.Service, error) {
 	dummySvc = nil
 	err = retry.UntilSuccess(func() error {
 		var err error
-		dummySvc, err = c.CoreV1().Services(echos.Namespace.Name()).Get(context.TODO(), dummySvcName, kubeMeta.GetOptions{})
+		dummySvc, err = c.Kube().CoreV1().Services(echos.Namespace.Name()).Get(context.TODO(), dummySvcName, kubeMeta.GetOptions{})
 		if err != nil {
 			return err
 		}
@@ -516,7 +515,7 @@ func genClusterSetIPService(c cluster.Cluster) (*kubeCore.Service, error) {
 
 func createServiceImport(c cluster.Cluster, vip string, serviceImportGVR schema.GroupVersionResource) error {
 	// Get the definition for service B, so we can get the ports.
-	svc, err := c.CoreV1().Services(echos.Namespace.Name()).Get(context.TODO(), common.ServiceB, kubeMeta.GetOptions{})
+	svc, err := c.Kube().CoreV1().Services(echos.Namespace.Name()).Get(context.TODO(), common.ServiceB, kubeMeta.GetOptions{})
 	if err != nil {
 		return err
 	}

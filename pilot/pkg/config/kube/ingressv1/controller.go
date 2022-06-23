@@ -102,16 +102,18 @@ var errUnsupportedOp = errors.New("unsupported operation: the ingress config sto
 
 // NewController creates a new Kubernetes controller
 func NewController(client kube.Client, meshWatcher mesh.Holder,
-	options kubecontroller.Options) model.ConfigStoreCache {
+	options kubecontroller.Options,
+) model.ConfigStoreController {
 	if ingressNamespace == "" {
 		ingressNamespace = constants.IstioIngressNamespace
 	}
 
 	ingressInformer := client.KubeInformer().Networking().V1().Ingresses()
+	_ = ingressInformer.Informer().SetTransform(kube.StripUnusedFields)
 	serviceInformer := client.KubeInformer().Core().V1().Services()
 
 	classes := client.KubeInformer().Networking().V1().IngressClasses()
-	classes.Informer()
+	_ = classes.Informer().SetTransform(kube.StripUnusedFields)
 
 	c := &controller{
 		meshWatcher:     meshWatcher,
@@ -175,8 +177,7 @@ func (c *controller) shouldProcessIngressUpdate(ing *knetworking.Ingress) (bool,
 	return preProcessed, nil
 }
 
-func (c *controller) onEvent(key interface{}) error {
-	item := key.(types.NamespacedName)
+func (c *controller) onEvent(item types.NamespacedName) error {
 	event := model.EventUpdate
 	ing, err := c.ingressLister.Ingresses(item.Namespace).Get(item.Name)
 	if err != nil {

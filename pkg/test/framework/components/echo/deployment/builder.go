@@ -36,6 +36,7 @@ import (
 	"istio.io/istio/pkg/test/framework/components/istio"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/framework/resource"
+	"istio.io/istio/pkg/test/framework/resource/config/apply"
 	"istio.io/istio/pkg/test/scopes"
 	"istio.io/istio/pkg/util/sets"
 )
@@ -214,7 +215,7 @@ func (b builder) injectionTemplates() (map[string]sets.Set, error) {
 	for _, c := range b.ctx.Clusters().Kube() {
 		out[c.Name()] = sets.New()
 		// TODO find a place to read revision(s) and avoid listing
-		cms, err := c.CoreV1().ConfigMaps(ns).List(context.TODO(), metav1.ListOptions{})
+		cms, err := c.Kube().CoreV1().ConfigMaps(ns).List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -326,7 +327,7 @@ func (b builder) deployServices() (err error) {
 		cfg.YAML(ns, svcYaml)
 	}
 
-	return cfg.Apply(resource.NoCleanup)
+	return cfg.Apply(apply.NoCleanup)
 }
 
 func (b builder) deployInstances() (instances echo.Instances, err error) {

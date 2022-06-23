@@ -58,6 +58,7 @@ import (
 	"istio.io/istio/pkg/config/visibility"
 	"istio.io/istio/pkg/config/xds"
 	"istio.io/istio/pkg/kube/apimirror"
+	"istio.io/istio/pkg/util/grpc"
 	"istio.io/istio/pkg/util/protomarshal"
 	"istio.io/istio/pkg/util/sets"
 	"istio.io/pkg/log"
@@ -789,30 +790,30 @@ var ValidateEnvoyFilter = registerValidateFunc("ValidateEnvoyFilter",
 
 		for _, cp := range rule.ConfigPatches {
 			if cp == nil {
-				errs = appendValidation(errs, fmt.Errorf("Envoy filter: null config patch")) // nolint: golint,stylecheck
+				errs = appendValidation(errs, fmt.Errorf("Envoy filter: null config patch")) // nolint: stylecheck
 				continue
 			}
 			if cp.ApplyTo == networking.EnvoyFilter_INVALID {
-				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing applyTo")) // nolint: golint,stylecheck
+				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing applyTo")) // nolint: stylecheck
 				continue
 			}
 			if cp.Patch == nil {
-				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing patch")) // nolint: golint,stylecheck
+				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing patch")) // nolint: stylecheck
 				continue
 			}
 			if cp.Patch.Operation == networking.EnvoyFilter_Patch_INVALID {
-				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing patch operation")) // nolint: golint,stylecheck
+				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing patch operation")) // nolint: stylecheck
 				continue
 			}
 			if cp.Patch.Operation != networking.EnvoyFilter_Patch_REMOVE && cp.Patch.Value == nil {
-				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing patch value for non-remove operation")) // nolint: golint,stylecheck
+				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing patch value for non-remove operation")) // nolint: stylecheck
 				continue
 			}
 
 			// ensure that the supplied regex for proxy version compiles
 			if cp.Match != nil && cp.Match.Proxy != nil && cp.Match.Proxy.ProxyVersion != "" {
 				if _, err := regexp.Compile(cp.Match.Proxy.ProxyVersion); err != nil {
-					errs = appendValidation(errs, fmt.Errorf("Envoy filter: invalid regex for proxy version, [%v]", err)) // nolint: golint,stylecheck
+					errs = appendValidation(errs, fmt.Errorf("Envoy filter: invalid regex for proxy version, [%v]", err)) // nolint: stylecheck
 					continue
 				}
 			}
@@ -824,7 +825,7 @@ var ValidateEnvoyFilter = registerValidateFunc("ValidateEnvoyFilter",
 				networking.EnvoyFilter_HTTP_FILTER:
 				if cp.Match != nil && cp.Match.ObjectTypes != nil {
 					if cp.Match.GetListener() == nil {
-						errs = appendValidation(errs, fmt.Errorf("Envoy filter: applyTo for listener class objects cannot have non listener match")) // nolint: golint,stylecheck
+						errs = appendValidation(errs, fmt.Errorf("Envoy filter: applyTo for listener class objects cannot have non listener match")) // nolint: stylecheck
 						continue
 					}
 					listenerMatch := cp.Match.GetListener()
@@ -833,27 +834,27 @@ var ValidateEnvoyFilter = registerValidateFunc("ValidateEnvoyFilter",
 							if cp.ApplyTo == networking.EnvoyFilter_LISTENER || cp.ApplyTo == networking.EnvoyFilter_FILTER_CHAIN {
 								// This would be an error but is a warning for backwards compatibility
 								errs = appendValidation(errs, WrapWarning(
-									fmt.Errorf("Envoy filter: filter match has no effect when used with %v", cp.ApplyTo))) // nolint: golint,stylecheck
+									fmt.Errorf("Envoy filter: filter match has no effect when used with %v", cp.ApplyTo))) // nolint: stylecheck
 							}
 							// filter names are required if network filter matches are being made
 							if listenerMatch.FilterChain.Filter.Name == "" {
-								errs = appendValidation(errs, fmt.Errorf("Envoy filter: filter match has no name to match on")) // nolint: golint,stylecheck
+								errs = appendValidation(errs, fmt.Errorf("Envoy filter: filter match has no name to match on")) // nolint: stylecheck
 								continue
 							} else if listenerMatch.FilterChain.Filter.SubFilter != nil {
 								// sub filter match is supported only for applyTo HTTP_FILTER
 								if cp.ApplyTo != networking.EnvoyFilter_HTTP_FILTER {
-									errs = appendValidation(errs, fmt.Errorf("Envoy filter: subfilter match can be used with applyTo HTTP_FILTER only")) // nolint: golint,stylecheck
+									errs = appendValidation(errs, fmt.Errorf("Envoy filter: subfilter match can be used with applyTo HTTP_FILTER only")) // nolint: stylecheck
 									continue
 								}
 								// sub filter match requires the network filter to match to envoy http connection manager
 								if listenerMatch.FilterChain.Filter.Name != wellknown.HTTPConnectionManager &&
 									listenerMatch.FilterChain.Filter.Name != "envoy.http_connection_manager" {
-									errs = appendValidation(errs, fmt.Errorf("Envoy filter: subfilter match requires filter match with %s", // nolint: golint,stylecheck
+									errs = appendValidation(errs, fmt.Errorf("Envoy filter: subfilter match requires filter match with %s", // nolint: stylecheck
 										wellknown.HTTPConnectionManager))
 									continue
 								}
 								if listenerMatch.FilterChain.Filter.SubFilter.Name == "" {
-									errs = appendValidation(errs, fmt.Errorf("Envoy filter: subfilter match has no name to match on")) // nolint: golint,stylecheck
+									errs = appendValidation(errs, fmt.Errorf("Envoy filter: subfilter match has no name to match on")) // nolint: stylecheck
 									continue
 								}
 							}
@@ -867,14 +868,14 @@ var ValidateEnvoyFilter = registerValidateFunc("ValidateEnvoyFilter",
 				if cp.Match != nil && cp.Match.ObjectTypes != nil {
 					if cp.Match.GetRouteConfiguration() == nil {
 						errs = appendValidation(errs,
-							fmt.Errorf("Envoy filter: applyTo for http route class objects cannot have non route configuration match")) // nolint: golint,stylecheck
+							fmt.Errorf("Envoy filter: applyTo for http route class objects cannot have non route configuration match")) // nolint: stylecheck
 					}
 				}
 
 			case networking.EnvoyFilter_CLUSTER:
 				if cp.Match != nil && cp.Match.ObjectTypes != nil {
 					if cp.Match.GetCluster() == nil {
-						errs = appendValidation(errs, fmt.Errorf("Envoy filter: applyTo for cluster class objects cannot have non cluster match")) // nolint: golint,stylecheck
+						errs = appendValidation(errs, fmt.Errorf("Envoy filter: applyTo for cluster class objects cannot have non cluster match")) // nolint: stylecheck
 					}
 				}
 			}
@@ -892,6 +893,7 @@ var ValidateEnvoyFilter = registerValidateFunc("ValidateEnvoyFilter",
 				// Append any deprecation notices
 				if obj != nil {
 					errs = appendValidation(errs, validateDeprecatedFilterTypes(obj))
+					errs = appendValidation(errs, validateMissingTypedConfigFilterTypes(obj))
 				}
 			}
 		}
@@ -947,6 +949,43 @@ func recurseDeprecatedTypes(message protoreflect.Message) ([]string, error) {
 	return deprecatedTypes, topError
 }
 
+// recurseMissingTypedConfig checks that configured filters do not rely on `name` and elide `typed_config`.
+// This is temporarily enabled in Envoy by the envoy.reloadable_features.no_extension_lookup_by_name flag, but in the future will be removed.
+func recurseMissingTypedConfig(message protoreflect.Message) []string {
+	var deprecatedTypes []string
+	if message == nil {
+		return nil
+	}
+	// First, iterate over the fields to find the 'name' field to help with reporting errors.
+	var name string
+	for i := 0; i < message.Type().Descriptor().Fields().Len(); i++ {
+		field := message.Type().Descriptor().Fields().Get(i)
+		if field.JSONName() == "name" {
+			name = fmt.Sprintf("%v", message.Get(field).Interface())
+		}
+	}
+
+	// Now go through fields again
+	for i := 0; i < message.Type().Descriptor().Fields().Len(); i++ {
+		field := message.Type().Descriptor().Fields().Get(i)
+		set := message.Has(field)
+		// If it has a typedConfig field, it must be set.
+		// Note: it is possible there is some API that has typedConfig but has a non-deprecated alternative,
+		// but I couldn't find any. Worst case, this is a warning, not an error, so a false positive is not so bad.
+		if field.JSONName() == "typedConfig" && !set {
+			deprecatedTypes = append(deprecatedTypes, name)
+		}
+		if set {
+			// If the field was set and is a message, recurse into it to check children
+			m, isMessage := message.Get(field).Interface().(protoreflect.Message)
+			if isMessage {
+				deprecatedTypes = append(deprecatedTypes, recurseMissingTypedConfig(m)...)
+			}
+		}
+	}
+	return deprecatedTypes
+}
+
 func validateDeprecatedFilterTypes(obj proto.Message) error {
 	deprecated, err := recurseDeprecatedTypes(obj.ProtoReflect())
 	if err != nil {
@@ -954,6 +993,14 @@ func validateDeprecatedFilterTypes(obj proto.Message) error {
 	}
 	if len(deprecated) > 0 {
 		return WrapWarning(fmt.Errorf("using deprecated type_url(s); %v", strings.Join(deprecated, ", ")))
+	}
+	return nil
+}
+
+func validateMissingTypedConfigFilterTypes(obj proto.Message) error {
+	missing := recurseMissingTypedConfig(obj.ProtoReflect())
+	if len(missing) > 0 {
+		return WrapWarning(fmt.Errorf("using deprecated types by name without typed_config; %v", strings.Join(missing, ", ")))
 	}
 	return nil
 }
@@ -1204,7 +1251,8 @@ func validateSidecarOutboundTrafficPolicy(tp *networking.OutboundTrafficPolicy) 
 }
 
 func validateSidecarEgressPortBindAndCaptureMode(port *networking.Port, bind string,
-	captureMode networking.CaptureMode) (errs error) {
+	captureMode networking.CaptureMode,
+) (errs error) {
 	// Port name is optional. Validate if exists.
 	if len(port.Name) > 0 {
 		errs = appendErrors(errs, ValidatePortName(port.Name))
@@ -1260,7 +1308,7 @@ func validateTrafficPolicy(policy *networking.TrafficPolicy) Validation {
 		return Validation{}
 	}
 	if policy.OutlierDetection == nil && policy.ConnectionPool == nil &&
-		policy.LoadBalancer == nil && policy.Tls == nil && policy.PortLevelSettings == nil {
+		policy.LoadBalancer == nil && policy.Tls == nil && policy.PortLevelSettings == nil && policy.Tunnel == nil {
 		return WrapError(fmt.Errorf("traffic policy must have at least one field"))
 	}
 
@@ -1268,7 +1316,29 @@ func validateTrafficPolicy(policy *networking.TrafficPolicy) Validation {
 		validateConnectionPool(policy.ConnectionPool),
 		validateLoadBalancer(policy.LoadBalancer),
 		validateTLS(policy.Tls),
-		validatePortTrafficPolicies(policy.PortLevelSettings))
+		validatePortTrafficPolicies(policy.PortLevelSettings),
+		validateTunnelSettings(policy.Tunnel))
+}
+
+func validateTunnelSettings(tunnel *networking.TrafficPolicy_TunnelSettings) (errs error) {
+	if tunnel == nil {
+		return
+	}
+	if tunnel.Protocol == "" {
+		errs = appendErrors(errs, fmt.Errorf("tunnel protocol must be specified"))
+	}
+	if tunnel.Protocol != "CONNECT" && tunnel.Protocol != "POST" {
+		errs = appendErrors(errs, fmt.Errorf("tunnel protocol must be \"CONNECT\" or \"POST\""))
+	}
+	fqdnErr := ValidateFQDN(tunnel.TargetHost)
+	ipErr := ValidateIPAddress(tunnel.TargetHost)
+	if fqdnErr != nil && ipErr != nil {
+		errs = appendErrors(errs, fmt.Errorf("tunnel target host must be valid FQDN or IP address: %s; %s", fqdnErr, ipErr))
+	}
+	if err := ValidatePort(int(tunnel.TargetPort)); err != nil {
+		errs = appendErrors(errs, fmt.Errorf("tunnel target port is invalid: %s", err))
+	}
+	return
 }
 
 func validateOutlierDetection(outlier *networking.OutlierDetection) (errs Validation) {
@@ -1746,7 +1816,7 @@ func ValidateMeshConfigProxyConfig(config *meshconfig.ProxyConfig) (errs error) 
 		if err := ValidateProxyAddress(config.EnvoyMetricsServiceAddress); err != nil {
 			errs = multierror.Append(errs, multierror.Prefix(err, fmt.Sprintf("invalid envoy metrics service address %q:", config.EnvoyMetricsServiceAddress)))
 		} else {
-			scope.Warnf("EnvoyMetricsServiceAddress is deprecated, use EnvoyMetricsService instead.") // nolint: golint,stylecheck
+			scope.Warnf("EnvoyMetricsServiceAddress is deprecated, use EnvoyMetricsService instead.") // nolint: stylecheck
 		}
 	}
 
@@ -2185,7 +2255,8 @@ func assignExactOrPrefix(exact, prefix string) string {
 // based on particular HTTPMatchRequest, according to comments on https://github.com/istio/istio/pull/32701
 // only support Match's port, method, authority, headers, query params and nonheaders for now.
 func genMatchHTTPRoutes(route *networking.HTTPRoute, match *networking.HTTPMatchRequest,
-	rulen, matchn int) (matchHTTPRoutes *OverlappingMatchValidationForHTTPRoute) {
+	rulen, matchn int,
+) (matchHTTPRoutes *OverlappingMatchValidationForHTTPRoute) {
 	// skip current match if no match field for current route
 	if match == nil {
 		return nil
@@ -2335,7 +2406,8 @@ func coveredValidation(vA, vB *OverlappingMatchValidationForHTTPRoute) bool {
 }
 
 func analyzeUnreachableHTTPRules(routes []*networking.HTTPRoute,
-	reportUnreachable func(ruleno, reason string), reportIneffective func(ruleno, matchno, dupno string)) {
+	reportUnreachable func(ruleno, reason string), reportIneffective func(ruleno, matchno, dupno string),
+) {
 	matchesEncountered := make(map[string]int)
 	emptyMatchEncountered := -1
 	var matchHTTPRoutes []*OverlappingMatchValidationForHTTPRoute
@@ -2394,7 +2466,8 @@ func analyzeUnreachableHTTPRules(routes []*networking.HTTPRoute,
 
 // NOTE: This method identical to analyzeUnreachableHTTPRules.
 func analyzeUnreachableTCPRules(routes []*networking.TCPRoute,
-	reportUnreachable func(ruleno, reason string), reportIneffective func(ruleno, matchno, dupno string)) {
+	reportUnreachable func(ruleno, reason string), reportIneffective func(ruleno, matchno, dupno string),
+) {
 	matchesEncountered := make(map[string]int)
 	emptyMatchEncountered := -1
 	for rulen, route := range routes {
@@ -2427,7 +2500,8 @@ func analyzeUnreachableTCPRules(routes []*networking.TCPRoute,
 
 // NOTE: This method identical to analyzeUnreachableHTTPRules.
 func analyzeUnreachableTLSRules(routes []*networking.TLSRoute,
-	reportUnreachable func(ruleno, reason string), reportIneffective func(ruleno, matchno, dupno string)) {
+	reportUnreachable func(ruleno, reason string), reportIneffective func(ruleno, matchno, dupno string),
+) {
 	matchesEncountered := make(map[string]int)
 	emptyMatchEncountered := -1
 	for rulen, route := range routes {
@@ -2797,8 +2871,7 @@ func validateHTTPFaultInjectionAbort(abort *networking.HTTPFaultInjection_Abort)
 
 	switch abort.ErrorType.(type) {
 	case *networking.HTTPFaultInjection_Abort_GrpcStatus:
-		// TODO: gRPC status validation
-		errs = multierror.Append(errs, errors.New("gRPC abort fault injection not supported yet"))
+		errs = appendErrors(errs, validateGRPCStatus(abort.GetGrpcStatus()))
 	case *networking.HTTPFaultInjection_Abort_Http2Error:
 		// TODO: HTTP2 error validation
 		errs = multierror.Append(errs, errors.New("HTTP/2 abort fault injection not supported yet"))
@@ -2812,6 +2885,15 @@ func validateHTTPFaultInjectionAbort(abort *networking.HTTPFaultInjection_Abort)
 func validateHTTPStatus(status int32) error {
 	if status < 200 || status > 600 {
 		return fmt.Errorf("HTTP status %d is not in range 200-599", status)
+	}
+	return nil
+}
+
+func validateGRPCStatus(status string) error {
+	_, found := grpc.SupportedGRPCStatus[status]
+	if !found {
+		return fmt.Errorf("gRPC status %q is not supported. See https://github.com/grpc/grpc/blob/master/doc/statuscodes.md "+
+			"for a list of supported codes, for example 'NOT_FOUND'", status)
 	}
 	return nil
 }

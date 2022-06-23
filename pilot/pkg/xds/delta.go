@@ -105,10 +105,30 @@ func (s *DiscoveryServer) StreamDeltas(stream DeltaDiscoveryStream) error {
 	<-con.initialized
 
 	for {
+		// Go select{} statements are not ordered; the same channel can be chosen many times.
+		// For requests, these are higher priority (client may be blocked on startup until these are done)
+		// and often very cheap to handle (simple ACK), so we check it first.
 		select {
 		case req, ok := <-con.deltaReqChan:
 			if ok {
-				deltaLog.Debugf("ADS: got Delta Request for: %s", req.TypeUrl)
+				if err := s.processDeltaRequest(req, con); err != nil {
+					return err
+				}
+			} else {
+				// Remote side closed connection or error processing the request.
+				return <-con.errorChan
+			}
+		case <-con.stop:
+			return nil
+		default:
+		}
+		// If there wasn't already a request, poll for requests and pushes. Note: if we have a huge
+		// amount of incoming requests, we may still send some pushes, as we do not `continue` above;
+		// however, requests will be handled ~2x as much as pushes. This ensures a wave of requests
+		// cannot completely starve pushes. However, this scenario is unlikely.
+		select {
+		case req, ok := <-con.deltaReqChan:
+			if ok {
 				if err := s.processDeltaRequest(req, con); err != nil {
 					return err
 				}
@@ -383,7 +403,8 @@ func (s *DiscoveryServer) shouldRespondDelta(con *Connection, request *discovery
 // Push an Delta XDS resource for the given connection. Configuration will be generated
 // based on the passed in generator.
 func (s *DiscoveryServer) pushDeltaXds(con *Connection,
-	w *model.WatchedResource, req *model.PushRequest) error {
+	w *model.WatchedResource, req *model.PushRequest,
+) error {
 	if w == nil {
 		return nil
 	}
@@ -417,8 +438,8 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection,
 	case model.XdsDeltaResourceGenerator:
 		res, deletedRes, logdata, usedDelta, err = g.GenerateDeltas(con.proxy, req, w)
 		if features.EnableUnsafeDeltaTest {
-			fullRes, _, _ := g.Generate(con.proxy, originalW, req)
-			s.compareDiff(con, originalW, fullRes, res, deletedRes, usedDelta, req.Delta)
+			fullRes, l, _ := g.Generate(con.proxy, originalW, req)
+			s.compareDiff(con, originalW, fullRes, res, deletedRes, usedDelta, req.Delta, l.Incremental)
 		}
 	case model.XdsResourceGenerator:
 		res, logdata, err = g.Generate(con.proxy, w, req)
@@ -445,7 +466,7 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection,
 	} else if req.Full {
 		// similar to sotw
 		subscribed := sets.New(w.ResourceNames...)
-		subscribed.Delete(currentResources...)
+		subscribed.DeleteAll(currentResources...)
 		resp.RemovedResources = subscribed.SortedList()
 	}
 	if len(resp.RemovedResources) > 0 {
@@ -528,7 +549,7 @@ func deltaToSotwRequest(request *discovery.DeltaDiscoveryRequest) *discovery.Dis
 func deltaWatchedResources(existing []string, request *discovery.DeltaDiscoveryRequest) []string {
 	res := sets.New(existing...)
 	res.InsertAll(request.ResourceNamesSubscribe...)
-	res.Delete(request.ResourceNamesUnsubscribe...)
+	res.DeleteAll(request.ResourceNamesUnsubscribe...)
 	return res.SortedList()
 }
 

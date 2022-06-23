@@ -107,6 +107,7 @@ func TestAgent(t *testing.T) {
 		// All of the other tests use ECC for speed. Here we make sure RSA still works
 		Setup(t, func(a AgentTest) AgentTest {
 			a.Security.ECCSigAlg = ""
+			a.Security.WorkloadRSAKeySize = 2048
 			return a
 		}).Check(t, security.WorkloadKeyCertResourceName, security.RootCertReqResourceName)
 	})
@@ -686,7 +687,7 @@ func Setup(t *testing.T, opts ...func(a AgentTest) AgentTest) *AgentTest {
 	}
 
 	a := NewAgent(resp.ProxyConfig, &resp.AgentConfig, &resp.Security, envoy.ProxyConfig{TestOnly: !resp.envoyEnable})
-	t.Cleanup(a.Close)
+	t.Cleanup(a.close)
 	ctx, done := context.WithCancel(context.Background())
 	wait, err := a.Run(ctx)
 	if err != nil {

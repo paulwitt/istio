@@ -22,6 +22,7 @@ import (
 
 	"istio.io/api/label"
 	networking "istio.io/api/networking/v1alpha3"
+	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
 	labelutil "istio.io/istio/pilot/pkg/serviceregistry/util/label"
@@ -35,6 +36,7 @@ import (
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/network"
 	"istio.io/istio/pkg/spiffe"
+	"istio.io/istio/pkg/test"
 )
 
 var (
@@ -474,7 +476,8 @@ func convertPortNameToProtocol(name string) protocol.Instance {
 }
 
 func makeService(hostname host.Name, configNamespace, address string, ports map[string]int,
-	external bool, resolution model.Resolution, serviceAccounts ...string) *model.Service {
+	external bool, resolution model.Resolution, serviceAccounts ...string,
+) *model.Service {
 	svc := &model.Service{
 		CreationTime:    GlobalTime,
 		Hostname:        hostname,
@@ -487,6 +490,14 @@ func makeService(hostname host.Name, configNamespace, address string, ports map[
 			Name:            string(hostname),
 			Namespace:       configNamespace,
 		},
+	}
+
+	if external && features.CanonicalServiceForMeshExternalServiceEntry {
+		if svc.Attributes.Labels == nil {
+			svc.Attributes.Labels = make(map[string]string)
+		}
+		svc.Attributes.Labels["service.istio.io/canonical-name"] = configNamespace
+		svc.Attributes.Labels["service.istio.io/canonical-revision"] = "latest"
 	}
 
 	svcPorts := make(model.PortList, 0, len(ports))
@@ -516,7 +527,8 @@ const (
 
 // nolint: unparam
 func makeInstanceWithServiceAccount(cfg *config.Config, address string, port int,
-	svcPort *networking.Port, svcLabels map[string]string, serviceAccount string) *model.ServiceInstance {
+	svcPort *networking.Port, svcLabels map[string]string, serviceAccount string,
+) *model.ServiceInstance {
 	i := makeInstance(cfg, address, port, svcPort, svcLabels, MTLSUnlabelled)
 	i.Endpoint.ServiceAccount = spiffe.MustGenSpiffeURI(i.Service.Attributes.Namespace, serviceAccount)
 	return i
@@ -524,7 +536,8 @@ func makeInstanceWithServiceAccount(cfg *config.Config, address string, port int
 
 // nolint: unparam
 func makeInstance(cfg *config.Config, address string, port int,
-	svcPort *networking.Port, svcLabels map[string]string, mtlsMode MTLSMode) *model.ServiceInstance {
+	svcPort *networking.Port, svcLabels map[string]string, mtlsMode MTLSMode,
+) *model.ServiceInstance {
 	services := convertServices(*cfg)
 	svc := services[0] // default
 	for _, s := range services {
@@ -561,6 +574,14 @@ func makeInstance(cfg *config.Config, address string, port int,
 }
 
 func TestConvertService(t *testing.T) {
+	testConvertServiceBody(t)
+	test.SetBoolForTest(t, &features.CanonicalServiceForMeshExternalServiceEntry, true)
+	testConvertServiceBody(t)
+}
+
+func testConvertServiceBody(t *testing.T) {
+	t.Helper()
+
 	serviceTests := []struct {
 		externalSvc *config.Config
 		services    []*model.Service

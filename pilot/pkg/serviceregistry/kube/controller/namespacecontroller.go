@@ -52,12 +52,13 @@ type NamespaceController struct {
 // NewNamespaceController returns a pointer to a newly constructed NamespaceController instance.
 func NewNamespaceController(kubeClient kube.Client, caBundleWatcher *keycertbundle.Watcher) *NamespaceController {
 	c := &NamespaceController{
-		client:          kubeClient.CoreV1(),
+		client:          kubeClient.Kube().CoreV1(),
 		caBundleWatcher: caBundleWatcher,
 	}
 	c.queue = controllers.NewQueue("namespace controller", controllers.WithReconciler(c.insertDataForNamespace))
 
 	c.configMapInformer = kubeClient.KubeInformer().Core().V1().ConfigMaps().Informer()
+	_ = c.configMapInformer.SetTransform(kube.StripUnusedFields)
 	c.configmapLister = kubeClient.KubeInformer().Core().V1().ConfigMaps().Lister()
 	c.namespacesInformer = kubeClient.KubeInformer().Core().V1().Namespaces().Informer()
 	c.namespaceLister = kubeClient.KubeInformer().Core().V1().Namespaces().Lister()
@@ -82,7 +83,7 @@ func NewNamespaceController(kubeClient kube.Client, caBundleWatcher *keycertbund
 
 // Run starts the NamespaceController until a value is sent to stopCh.
 func (nc *NamespaceController) Run(stopCh <-chan struct{}) {
-	if !cache.WaitForCacheSync(stopCh, nc.namespacesInformer.HasSynced, nc.configMapInformer.HasSynced) {
+	if !kube.WaitForCacheSync(stopCh, nc.namespacesInformer.HasSynced, nc.configMapInformer.HasSynced) {
 		log.Error("Failed to sync namespace controller cache")
 		return
 	}
@@ -110,8 +111,7 @@ func (nc *NamespaceController) startCaBundleWatcher(stop <-chan struct{}) {
 // insertDataForNamespace will add data into the configmap for the specified namespace
 // If the configmap is not found, it will be created.
 // If you know the current contents of the configmap, using UpdateDataInConfigMap is more efficient.
-func (nc *NamespaceController) insertDataForNamespace(key interface{}) error {
-	o := key.(types.NamespacedName)
+func (nc *NamespaceController) insertDataForNamespace(o types.NamespacedName) error {
 	ns := o.Namespace
 	if ns == "" {
 		// For Namespace object, it will not have o.Namespace field set

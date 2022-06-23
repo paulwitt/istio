@@ -20,6 +20,7 @@
 package xds
 
 import (
+	_ "github.com/envoyproxy/go-control-plane/contrib/envoy/extensions/filters/http/language/v3alpha"
 	_ "github.com/envoyproxy/go-control-plane/contrib/envoy/extensions/filters/http/squash/v3"
 	_ "github.com/envoyproxy/go-control-plane/contrib/envoy/extensions/filters/http/sxg/v3alpha"
 	_ "github.com/envoyproxy/go-control-plane/contrib/envoy/extensions/filters/network/kafka_broker/v3"
@@ -160,6 +161,7 @@ import (
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/aggregate/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/dynamic_forward_proxy/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/redis/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/common/async_files/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/common/dynamic_forward_proxy/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/common/matching/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/common/ratelimit/v3"
@@ -168,6 +170,8 @@ import (
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/compression/brotli/decompressor/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/compression/gzip/compressor/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/compression/gzip/decompressor/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/compression/zstd/compressor/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/compression/zstd/decompressor/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/config/validators/minimum_clusters/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/common/dependency/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/common/fault/v3"
@@ -191,6 +195,7 @@ import (
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/fault/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/gcp_authn/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/grpc_http1_bridge/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/grpc_http1_reverse_bridge/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/grpc_json_transcoder/v3"

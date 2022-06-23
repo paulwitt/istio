@@ -51,7 +51,7 @@ var (
 )
 
 // Controller defines the controller for the gateway-api. The controller acts a bit different from most.
-// Rather than watching the CRs directly, we depend on the existing model.ConfigStoreCache which
+// Rather than watching the CRs directly, we depend on the existing model.ConfigStoreController which
 // already watches all CRs. When there are updates, a new PushContext will be computed, which will eventually
 // call Controller.Recompute(). Once this happens, we will inspect the current state of the world, and transform
 // gateway-api types into Istio types (Gateway/VirtualService). Future calls to Get/List will return these
@@ -62,7 +62,7 @@ type Controller struct {
 	// client for accessing Kubernetes
 	client kube.Client
 	// cache provides access to the underlying gateway-configs
-	cache model.ConfigStoreCache
+	cache model.ConfigStoreController
 
 	// Gateway-api types reference namespace labels directly, so we need access to these
 	namespaceLister   listerv1.NamespaceLister
@@ -84,7 +84,7 @@ type Controller struct {
 
 var _ model.GatewayController = &Controller{}
 
-func NewController(client kube.Client, c model.ConfigStoreCache, options controller.Options) *Controller {
+func NewController(client kube.Client, c model.ConfigStoreController, options controller.Options) *Controller {
 	var ctl *status.Controller
 
 	nsInformer := client.KubeInformer().Core().V1().Namespaces().Informer()
@@ -279,7 +279,7 @@ func (c *Controller) Run(stop <-chan struct{}) {
 			gcc.Run(stop)
 		}
 	}()
-	cache.WaitForCacheSync(stop, c.namespaceInformer.HasSynced)
+	kube.WaitForCacheSync(stop, c.namespaceInformer.HasSynced)
 }
 
 func (c *Controller) SetWatchErrorHandler(handler func(r *cache.Reflector, err error)) error {
@@ -298,7 +298,9 @@ func (c *Controller) SecretAllowed(resourceName string, namespace string) bool {
 	}
 	from := Reference{Kind: gvk.KubernetesGateway, Namespace: k8s.Namespace(namespace)}
 	to := Reference{Kind: gvk.Secret, Namespace: k8s.Namespace(p.Namespace)}
+	c.stateMu.RLock()
 	allow := c.state.AllowedReferences[from][to]
+	c.stateMu.RUnlock()
 	if allow == nil {
 		return false
 	}

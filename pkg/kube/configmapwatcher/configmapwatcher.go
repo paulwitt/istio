@@ -23,9 +23,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	informersv1 "k8s.io/client-go/informers/core/v1"
-	"k8s.io/client-go/tools/cache"
 
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/controllers"
@@ -73,7 +73,7 @@ func NewController(client kube.Client, namespace, name string, callback func(*v1
 
 func (c *Controller) Run(stop <-chan struct{}) {
 	go c.informer.Informer().Run(stop)
-	if !cache.WaitForCacheSync(stop, c.informer.Informer().HasSynced) {
+	if !kube.WaitForCacheSync(stop, c.informer.Informer().HasSynced) {
 		log.Error("failed to wait for cache sync")
 		return
 	}
@@ -85,7 +85,7 @@ func (c *Controller) HasSynced() bool {
 	return c.queue.HasSynced()
 }
 
-func (c *Controller) processItem(interface{}) error {
+func (c *Controller) processItem(name types.NamespacedName) error {
 	cm, err := c.informer.Lister().ConfigMaps(c.configMapNamespace).Get(c.configMapName)
 	if err != nil {
 		if !errors.IsNotFound(err) {

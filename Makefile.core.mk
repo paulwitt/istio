@@ -12,6 +12,22 @@
 ## See the License for the specific language governing permissions and
 ## limitations under the License.
 
+# Our build tools, post jammy, breaks old versions of docker.
+# These old versions are surprisingly common, so build in a check here
+define warning
+Docker version is too old, please upgrade to a newer version.
+endef
+ifneq ($(findstring google,$(HOSTNAME)),)
+warning+=Googlers: go/installdocker\#the-version-of-docker-thats-installed-is-old-eg-1126
+endif
+# The old docker issue manifests as not being able to run *any* binary. So we can test
+# by trying to run a trivial program and ensuring it actually ran. If not, emit our warning.
+# Note: we cannot do anything like $(shell docker version) to check, since that would also fail.
+CAN_RUN := $(shell echo "can I run echo")
+ifeq ($(CAN_RUN),)
+$(error $(warning))
+endif
+
 #-----------------------------------------------------------------------------
 # Global Variables
 #-----------------------------------------------------------------------------
@@ -19,10 +35,10 @@ ISTIO_GO := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 export ISTIO_GO
 SHELL := /bin/bash -o pipefail
 
-export VERSION ?= 1.14-dev
+export VERSION ?= 1.15-dev
 
 # Base version of Istio image to use
-BASE_VERSION ?= master-2022-04-12T19-01-34
+BASE_VERSION ?= master-2022-06-22T19-31-10
 
 export GO111MODULE ?= on
 export GOPROXY ?= https://proxy.golang.org
@@ -211,8 +227,7 @@ ${ISTIO_ENVOY_LINUX_DEBUG_PATH}: init
 ${ISTIO_ENVOY_LINUX_RELEASE_PATH}: init
 ${ISTIO_ENVOY_MACOS_RELEASE_PATH}: init
 
-# Pull dependencies, based on the checked in Gopkg.lock file.
-# Developers must manually run `dep ensure` if adding new deps
+# Pull dependencies such as envoy
 depend: init | $(TARGET_OUT)
 
 DIRS_TO_CLEAN := $(TARGET_OUT)
@@ -254,6 +269,7 @@ STANDARD_BINARIES:=./istioctl/cmd/istioctl \
   ./pilot/cmd/pilot-discovery \
   ./pkg/test/echo/cmd/client \
   ./pkg/test/echo/cmd/server \
+  ./samples/extauthz/cmd/extauthz \
   ./operator/cmd/operator \
   ./cni/cmd/istio-cni \
   ./cni/cmd/istio-cni-taint \
@@ -332,6 +348,9 @@ update-golden: refresh-goldens
 gen-charts:
 	@echo "This target is no longer required and will be removed in the future"
 
+gen-addons:
+	manifests/addons/gen.sh
+
 gen: \
 	mod-download-go \
 	go-gen \
@@ -341,6 +360,7 @@ gen: \
 	proto \
 	copy-templates \
 	gen-kustomize \
+	gen-addons \
 	update-golden ## Update all generated code.
 
 gen-check: gen check-clean-repo
@@ -379,11 +399,7 @@ copy-templates:
 
 	# copy istio-discovery values, but apply some local customizations
 	cp manifests/charts/istio-control/istio-discovery/values.yaml manifests/charts/istiod-remote/
-	yq w manifests/charts/istiod-remote/values.yaml telemetry.enabled false -i
-	yq w manifests/charts/istiod-remote/values.yaml global.externalIstiod true -i
-	yq w manifests/charts/istiod-remote/values.yaml global.omitSidecarInjectorConfigMap true -i
-	yq w manifests/charts/istiod-remote/values.yaml pilot.configMap false -i
-
+	yq -i '.telemetry.enabled=false | .global.externalIstiod=true | .global.omitSidecarInjectorConfigMap=true | .pilot.configMap=false' manifests/charts/istiod-remote/values.yaml
 # Generate kustomize templates.
 gen-kustomize:
 	helm3 template istio --namespace istio-system --include-crds manifests/charts/base > manifests/charts/base/files/gen-istio-cluster.yaml

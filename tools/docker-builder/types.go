@@ -72,8 +72,13 @@ type Args struct {
 	Tags          []string
 	Hubs          []string
 
-	// Plan describes the build plan, read from file
-	Plan BuildPlan
+	// Plan describes the build plan, read from file.
+	// This is a map of architecture -> plan, as the plan is arch specific.
+	Plan map[string]BuildPlan
+}
+
+func (a Args) PlanFor(arch string) BuildPlan {
+	return a.Plan[arch]
 }
 
 func (a Args) String() string {
@@ -119,7 +124,7 @@ type BuildPlan struct {
 }
 
 func (p BuildPlan) Targets() []string {
-	tgts := sets.New()
+	tgts := sets.New("init") // All targets depend on init
 	for _, img := range p.Images {
 		tgts.InsertAll(img.Targets...)
 	}

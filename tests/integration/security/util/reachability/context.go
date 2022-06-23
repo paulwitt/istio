@@ -29,7 +29,7 @@ import (
 	"istio.io/istio/pkg/test/framework/components/echo/check"
 	"istio.io/istio/pkg/test/framework/components/echo/match"
 	"istio.io/istio/pkg/test/framework/components/namespace"
-	"istio.io/istio/pkg/test/framework/resource"
+	"istio.io/istio/pkg/test/framework/resource/config/apply"
 	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/istio/tests/integration/security/util"
 	"istio.io/istio/tests/integration/security/util/scheck"
@@ -105,18 +105,14 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
 		c := c
 		testName := strings.TrimSuffix(c.ConfigFile, filepath.Ext(c.ConfigFile))
 		t.NewSubTest(testName).Run(func(t framework.TestContext) {
-			if c.SkippedForMulticluster && t.Clusters().IsMulticluster() {
-				t.Skip("https://github.com/istio/istio/issues/37307")
-			}
-
 			// Apply the policy.
 			cfg := t.ConfigIstio().File(c.Namespace.Name(), filepath.Join("./testdata", c.ConfigFile))
 			retry.UntilSuccessOrFail(t, func() error {
 				t.Logf("[%s] [%v] Apply config %s", testName, time.Now(), c.ConfigFile)
 				// TODO(https://github.com/istio/istio/issues/20460) We shouldn't need a retry loop
-				return cfg.Apply(resource.Wait)
+				return cfg.Apply(apply.Wait)
 			})
-			for _, clients := range []echo.Instances{apps.A, match.Namespace(apps.Namespace1.Name()).GetMatches(apps.B), apps.Headless, apps.Naked, apps.HeadlessNaked} {
+			for _, clients := range []echo.Instances{apps.A, match.Namespace(apps.Namespace1).GetMatches(apps.B), apps.Headless, apps.Naked, apps.HeadlessNaked} {
 				for _, from := range clients {
 					from := from
 					t.NewSubTest(fmt.Sprintf("%s in %s",
@@ -148,12 +144,6 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
 								continue
 							}
 
-							callCount := 1
-							if len(toClusters) > 1 {
-								// so we can validate all clusters are hit
-								callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
-							}
-
 							copts := &callOptions
 							// If test case specified service call options, use that instead.
 							if c.CallOpts != nil {
@@ -165,10 +155,14 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
 
 								// Set the target on the call options.
 								opts.To = to
-								opts.Count = callCount
+								if len(toClusters) == 1 {
+									opts.Count = 1
+								}
 
 								// TODO(https://github.com/istio/istio/issues/37629) go back to converge
 								opts.Retry.Options = []retry.Option{retry.Converge(1)}
+								// TODO(https://github.com/istio/istio/issues/37629) go back to 5s
+								opts.Timeout = time.Second * 10
 
 								expectSuccess := c.ExpectSuccess(from, opts)
 								expectMTLS := c.ExpectMTLS(from, opts)
@@ -186,7 +180,6 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
 									tpe = "negative"
 									opts.Check = scheck.NotOK()
 								}
-
 								include := c.Include
 								if include == nil {
 									include = func(_ echo.Instance, _ echo.CallOptions) bool { return true }
@@ -200,11 +193,7 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
 										tpe)
 
 									t.NewSubTest(subTestName).
-										RunParallel(func(t framework.TestContext) {
-											// TODO: fix Multiversion related test in multicluster
-											if t.Clusters().IsMulticluster() && apps.Multiversion.ContainsTarget(to) {
-												t.Skip("https://github.com/istio/istio/issues/37307")
-											}
+										Run(func(t framework.TestContext) {
 											if (apps.IsNaked(from)) && len(toClusters) > 1 {
 												// TODO use echotest to generate the cases that would work for multi-network + naked
 												t.Skip("https://github.com/istio/istio/issues/37307")

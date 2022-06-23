@@ -39,12 +39,12 @@ import (
 	"istio.io/istio/pkg/test/framework/resource"
 	ingressutil "istio.io/istio/tests/integration/security/sds_ingress/util"
 	sdstlsutil "istio.io/istio/tests/integration/security/sds_tls_origination/util"
-	"istio.io/istio/tests/integration/security/util"
 )
 
 // TestSimpleTlsOrigination test SIMPLE TLS mode with TLS origination happening at Gateway proxy
 // It uses CredentialName set in DestinationRule API to fetch secrets from k8s API server
 func TestSimpleTlsOrigination(t *testing.T) {
+	// nolint: staticcheck
 	framework.NewTest(t).
 		RequiresSingleNetwork(). // https://github.com/istio/istio/issues/37134
 		Features("security.egress.tls.sds").
@@ -115,6 +115,7 @@ func TestSimpleTlsOrigination(t *testing.T) {
 // TestMutualTlsOrigination test MUTUAL TLS mode with TLS origination happening at Gateway proxy
 // It uses CredentialName set in DestinationRule API to fetch secrets from k8s API server
 func TestMutualTlsOrigination(t *testing.T) {
+	// nolint: staticcheck
 	framework.NewTest(t).
 		RequiresSingleNetwork(). // https://github.com/istio/istio/issues/37134
 		Features("security.egress.mtls.sds").
@@ -328,7 +329,8 @@ spec:
 
 // Create the DestinationRule for TLS origination at Gateway by reading secret in istio-system namespace.
 func CreateDestinationRule(t framework.TestContext, to echo.Instances,
-	destinationRuleMode string, credentialName string) {
+	destinationRuleMode string, credentialName string,
+) {
 	args := map[string]interface{}{
 		"to":             to,
 		"Mode":           destinationRuleMode,
@@ -339,7 +341,8 @@ func CreateDestinationRule(t framework.TestContext, to echo.Instances,
 	istioCfg := istio.DefaultConfigOrFail(t, t)
 	systemNS := namespace.ClaimOrFail(t, t, istioCfg.SystemNamespace)
 
-	t.ConfigKube(t.Clusters().Default()).Eval(systemNS.Name(), args, DestinationRuleConfig).ApplyOrFail(t)
+	t.ConfigKube(t.Clusters().Default()).Eval(systemNS.Name(), args, DestinationRuleConfig).
+		ApplyOrFail(t)
 }
 
 type TLSTestCase struct {
@@ -351,8 +354,7 @@ type TLSTestCase struct {
 
 func CallOpts(to echo.Target, host string, tc TLSTestCase) echo.CallOptions {
 	return echo.CallOptions{
-		To:    to,
-		Count: util.CallsPerCluster * to.MustWorkloads().Len(),
+		To: to,
 		Port: echo.Port{
 			Name: "http",
 		},

@@ -23,6 +23,7 @@ import (
 	"net/http/pprof"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	adminapi "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
@@ -30,7 +31,6 @@ import (
 	wasm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/wasm/v3"
 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
-	resource "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"google.golang.org/protobuf/proto"
 	any "google.golang.org/protobuf/types/known/anypb"
 
@@ -45,6 +45,7 @@ import (
 	v3 "istio.io/istio/pilot/pkg/xds/v3"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/collection"
+	"istio.io/istio/pkg/config/xds"
 	"istio.io/istio/pkg/network"
 	"istio.io/istio/pkg/util/protomarshal"
 	istiolog "istio.io/pkg/log"
@@ -121,7 +122,7 @@ type SyncStatus struct {
 	RouteAcked           string `json:"route_acked,omitempty"`
 	EndpointSent         string `json:"endpoint_sent,omitempty"`
 	EndpointAcked        string `json:"endpoint_acked,omitempty"`
-	ExtesionConfigSent   string `json:"extensionconfig_sent,omitempty"`
+	ExtensionConfigSent  string `json:"extensionconfig_sent,omitempty"`
 	ExtensionConfigAcked string `json:"extensionconfig_acked,omitempty"`
 }
 
@@ -135,7 +136,8 @@ type SyncedVersions struct {
 
 // InitDebug initializes the debug handlers and adds a debug in-memory registry.
 func (s *DiscoveryServer) InitDebug(mux *http.ServeMux, sctl *aggregate.Controller, enableProfiling bool,
-	fetchWebhook func() map[string]string) {
+	fetchWebhook func() map[string]string,
+) {
 	// For debugging and load testing v2 we add an memory registry.
 	s.MemRegistry = memory.NewServiceDiscovery()
 	s.MemRegistry.EDSUpdater = s
@@ -213,7 +215,8 @@ func (s *DiscoveryServer) AddDebugHandlers(mux, internalMux *http.ServeMux, enab
 }
 
 func (s *DiscoveryServer) addDebugHandler(mux *http.ServeMux, internalMux *http.ServeMux,
-	path string, help string, handler func(http.ResponseWriter, *http.Request)) {
+	path string, help string, handler func(http.ResponseWriter, *http.Request),
+) {
 	s.debugHandlers[path] = help
 	// Add handler without auth. This mux is never exposed on an HTTP server and only used internally
 	if internalMux != nil {
@@ -282,8 +285,8 @@ func (s *DiscoveryServer) Syncz(w http.ResponseWriter, _ *http.Request) {
 				RouteAcked:           con.NonceAcked(v3.RouteType),
 				EndpointSent:         con.NonceSent(v3.EndpointType),
 				EndpointAcked:        con.NonceAcked(v3.EndpointType),
-				ExtesionConfigSent:   con.NonceSent(v3.ExtensionConfigurationType),
-				ExtensionConfigAcked: con.NonceSent(v3.ExtensionConfigurationType),
+				ExtensionConfigSent:  con.NonceSent(v3.ExtensionConfigurationType),
+				ExtensionConfigAcked: con.NonceAcked(v3.ExtensionConfigurationType),
 			})
 		}
 	}
@@ -302,9 +305,7 @@ func (s *DiscoveryServer) registryz(w http.ResponseWriter, req *http.Request) {
 // the full push.
 func (s *DiscoveryServer) endpointShardz(w http.ResponseWriter, req *http.Request) {
 	w.Header().Add("Content-Type", "application/json")
-	s.mutex.RLock()
-	out, _ := json.MarshalIndent(s.EndpointShardsByService, " ", " ")
-	s.mutex.RUnlock()
+	out, _ := json.MarshalIndent(s.EndpointIndex.Shardz(), " ", " ")
 	_, _ = w.Write(out)
 }
 
@@ -463,8 +464,8 @@ func (k kubernetesConfig) MarshalJSON() ([]byte, error) {
 // Config debugging.
 func (s *DiscoveryServer) configz(w http.ResponseWriter, req *http.Request) {
 	configs := make([]kubernetesConfig, 0)
-	s.Env.IstioConfigStore.Schemas().ForEach(func(schema collection.Schema) bool {
-		cfg, _ := s.Env.IstioConfigStore.List(schema.Resource().GroupVersionKind(), "")
+	s.Env.ConfigStore.Schemas().ForEach(func(schema collection.Schema) bool {
+		cfg, _ := s.Env.ConfigStore.List(schema.Resource().GroupVersionKind(), "")
 		for _, c := range cfg {
 			configs = append(configs, kubernetesConfig{c})
 		}
@@ -628,10 +629,6 @@ func (s *DiscoveryServer) ecdsz(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-const (
-	wasmHTTPFilterType = resource.APITypePrefix + "envoy.extensions.filters.http.wasm.v3.Wasm"
-)
-
 func unmarshalToWasm(r *discovery.Resource) (interface{}, error) {
 	tce := &core.TypedExtensionConfig{}
 	if err := r.GetResource().UnmarshalTo(tce); err != nil {
@@ -639,7 +636,7 @@ func unmarshalToWasm(r *discovery.Resource) (interface{}, error) {
 	}
 
 	switch tce.TypedConfig.TypeUrl {
-	case wasmHTTPFilterType:
+	case xds.WasmHTTPFilterType:
 		w := &wasm.Wasm{}
 		if err := tce.TypedConfig.UnmarshalTo(w); err != nil {
 			return nil, err
@@ -666,7 +663,8 @@ func (s *DiscoveryServer) ConfigDump(w http.ResponseWriter, req *http.Request) {
 		s.errorHandler(w, proxyID, con)
 		return
 	}
-	dump, err := s.configDump(con)
+	includeEds := req.URL.Query().Get("include_eds") == "true"
+	dump, err := s.configDump(con, includeEds)
 	if err != nil {
 		handleHTTPError(w, err)
 		return
@@ -676,76 +674,135 @@ func (s *DiscoveryServer) ConfigDump(w http.ResponseWriter, req *http.Request) {
 
 // configDump converts the connection internal state into an Envoy Admin API config dump proto
 // It is used in debugging to create a consistent object for comparison between Envoy and Pilot outputs
-func (s *DiscoveryServer) configDump(conn *Connection) (*adminapi.ConfigDump, error) {
-	dynamicActiveClusters := make([]*adminapi.ClustersConfigDump_DynamicCluster, 0)
-	req := &model.PushRequest{Push: conn.proxy.LastPushContext, Start: time.Now()}
-	clusters, _ := s.ConfigGenerator.BuildClusters(conn.proxy, req)
+func (s *DiscoveryServer) configDump(conn *Connection, includeEds bool) (*adminapi.ConfigDump, error) {
+	req := &model.PushRequest{Push: conn.proxy.LastPushContext, Start: time.Now(), Full: true}
+	version := req.Push.PushVersion
 
+	generate := func(typeUrl string) (model.Resources, error) {
+		w := conn.Watched(typeUrl)
+		if w == nil {
+			// Not watched, skip
+			return nil, nil
+		}
+		gen := s.findGenerator(typeUrl, conn)
+		if gen == nil {
+			// No generator found, skip
+			return nil, nil
+		}
+
+		cfg, _, err := gen.Generate(conn.proxy, w, req)
+		if err != nil {
+			log.Warnf("failed to generate %v: %v", typeUrl, err)
+		}
+		return cfg, err
+	}
+
+	clusters, err := generate(v3.ClusterType)
+	if err != nil {
+		return nil, err
+	}
+	dynamicActiveClusters := make([]*adminapi.ClustersConfigDump_DynamicCluster, 0)
 	for _, cs := range clusters {
 		dynamicActiveClusters = append(dynamicActiveClusters, &adminapi.ClustersConfigDump_DynamicCluster{Cluster: cs.Resource})
 	}
 	clustersAny, err := util.MessageToAnyWithError(&adminapi.ClustersConfigDump{
-		VersionInfo:           versionInfo(),
+		VersionInfo:           version,
 		DynamicActiveClusters: dynamicActiveClusters,
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	listeners, err := generate(v3.ListenerType)
+	if err != nil {
+		return nil, err
+	}
 	dynamicActiveListeners := make([]*adminapi.ListenersConfigDump_DynamicListener, 0)
-	listeners := s.ConfigGenerator.BuildListeners(conn.proxy, req.Push)
 	for _, cs := range listeners {
-		listener, err := any.New(cs)
-		if err != nil {
-			return nil, err
-		}
 		dynamicActiveListeners = append(dynamicActiveListeners, &adminapi.ListenersConfigDump_DynamicListener{
-			Name:        cs.Name,
-			ActiveState: &adminapi.ListenersConfigDump_DynamicListenerState{Listener: listener},
+			Name: cs.Name,
+			ActiveState: &adminapi.ListenersConfigDump_DynamicListenerState{
+				Listener:    cs.Resource,
+				VersionInfo: version,
+			},
 		})
 	}
 	listenersAny, err := util.MessageToAnyWithError(&adminapi.ListenersConfigDump{
-		VersionInfo:      versionInfo(),
+		VersionInfo:      version,
 		DynamicListeners: dynamicActiveListeners,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	routes, _ := s.ConfigGenerator.BuildHTTPRoutes(conn.proxy, req, conn.Routes())
-	routeConfigAny := util.MessageToAny(&adminapi.RoutesConfigDump{})
-	if len(routes) > 0 {
-		dynamicRouteConfig := make([]*adminapi.RoutesConfigDump_DynamicRouteConfig, 0)
-		for _, rs := range routes {
-			dynamicRouteConfig = append(dynamicRouteConfig, &adminapi.RoutesConfigDump_DynamicRouteConfig{RouteConfig: rs.Resource})
+	routes, err := generate(v3.RouteType)
+	if err != nil {
+		return nil, err
+	}
+	dynamicRouteConfig := make([]*adminapi.RoutesConfigDump_DynamicRouteConfig, 0)
+	for _, cs := range routes {
+		dynamicRouteConfig = append(dynamicRouteConfig, &adminapi.RoutesConfigDump_DynamicRouteConfig{
+			VersionInfo: version,
+			RouteConfig: cs.Resource,
+		})
+	}
+	routesAny, err := util.MessageToAnyWithError(&adminapi.RoutesConfigDump{
+		DynamicRouteConfigs: dynamicRouteConfig,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	secrets, err := generate(v3.SecretType)
+	if err != nil {
+		return nil, err
+	}
+	dynamicSecretsConfig := make([]*adminapi.SecretsConfigDump_DynamicSecret, 0)
+	for _, cs := range secrets {
+		// Secrets must be redacted
+		secret := &tls.Secret{}
+		if err := cs.Resource.UnmarshalTo(secret); err != nil {
+			istiolog.Warnf("failed to unmarshal secret: %v", err)
+			continue
 		}
-		routeConfigAny, err = util.MessageToAnyWithError(&adminapi.RoutesConfigDump{DynamicRouteConfigs: dynamicRouteConfig})
+		if secret.GetTlsCertificate() != nil {
+			secret.GetTlsCertificate().PrivateKey = &core.DataSource{
+				Specifier: &core.DataSource_InlineBytes{
+					InlineBytes: []byte("[redacted]"),
+				},
+			}
+		}
+		dynamicSecretsConfig = append(dynamicSecretsConfig, &adminapi.SecretsConfigDump_DynamicSecret{
+			VersionInfo: version,
+			Secret:      util.MessageToAny(secret),
+		})
+	}
+	secretsAny, err := util.MessageToAnyWithError(&adminapi.SecretsConfigDump{
+		DynamicActiveSecrets: dynamicSecretsConfig,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var endpointsAny *any.Any
+	// EDS is disabled by default for compatibility with Envoy config_dump interface
+	if includeEds {
+		endpoints, err := generate(v3.EndpointType)
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	secretsDump := &adminapi.SecretsConfigDump{}
-	if s.Generators[v3.SecretType] != nil {
-		secrets, _, _ := s.Generators[v3.SecretType].Generate(conn.proxy, conn.Watched(v3.SecretType), nil)
-		if len(secrets) > 0 {
-			for _, secretAny := range secrets {
-				secret := &tls.Secret{}
-				if err := secretAny.GetResource().UnmarshalTo(secret); err != nil {
-					istiolog.Warnf("failed to unmarshal secret: %v", err)
-				}
-				if secret.GetTlsCertificate() != nil {
-					secret.GetTlsCertificate().PrivateKey = &core.DataSource{
-						Specifier: &core.DataSource_InlineBytes{
-							InlineBytes: []byte("[redacted]"),
-						},
-					}
-				}
-				secretsDump.DynamicActiveSecrets = append(secretsDump.DynamicActiveSecrets, &adminapi.SecretsConfigDump_DynamicSecret{
-					Name:   secret.Name,
-					Secret: util.MessageToAny(secret),
-				})
-			}
+		endpointConfig := make([]*adminapi.EndpointsConfigDump_DynamicEndpointConfig, 0)
+		for _, cs := range endpoints {
+			endpointConfig = append(endpointConfig, &adminapi.EndpointsConfigDump_DynamicEndpointConfig{
+				VersionInfo:    version,
+				EndpointConfig: cs.Resource,
+			})
+		}
+		endpointsAny, err = util.MessageToAnyWithError(&adminapi.EndpointsConfigDump{
+			DynamicEndpointConfigs: endpointConfig,
+		})
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -753,14 +810,21 @@ func (s *DiscoveryServer) configDump(conn *Connection) (*adminapi.ConfigDump, er
 	scopedRoutesAny := util.MessageToAny(&adminapi.ScopedRoutesConfigDump{})
 	// The config dump must have all configs with connections specified in
 	// https://www.envoyproxy.io/docs/envoy/latest/api-v2/admin/v2alpha/config_dump.proto
+	configs := []*any.Any{
+		bootstrapAny,
+		clustersAny,
+	}
+	if includeEds {
+		configs = append(configs, endpointsAny)
+	}
+	configs = append(configs,
+		listenersAny,
+		scopedRoutesAny,
+		routesAny,
+		secretsAny,
+	)
 	configDump := &adminapi.ConfigDump{
-		Configs: []*any.Any{
-			bootstrapAny,
-			clustersAny, listenersAny,
-			scopedRoutesAny,
-			routeConfigAny,
-			util.MessageToAny(secretsDump),
-		},
+		Configs: configs,
 	}
 	return configDump, nil
 }
@@ -924,10 +988,33 @@ func (s *DiscoveryServer) forceDisconnect(w http.ResponseWriter, req *http.Reque
 	_, _ = w.Write([]byte("OK"))
 }
 
+func cloneProxy(proxy *model.Proxy) *model.Proxy {
+	if proxy == nil {
+		return nil
+	}
+
+	proxy.Lock()
+	defer proxy.Unlock()
+	// nolint: govet
+	copied := *proxy
+	out := &copied
+	out.RWMutex = sync.RWMutex{}
+	// clone WatchedResources which can be mutated when processing request
+	out.WatchedResources = make(map[string]*model.WatchedResource, len(proxy.WatchedResources))
+	for k, v := range proxy.WatchedResources {
+		// nolint: govet
+		v := *v
+		out.WatchedResources[k] = &v
+	}
+	return out
+}
+
 func (s *DiscoveryServer) getProxyConnection(proxyID string) *Connection {
 	for _, con := range s.Clients() {
 		if strings.Contains(con.conID, proxyID) {
-			return con
+			out := *con
+			out.proxy = cloneProxy(con.proxy)
+			return &out
 		}
 	}
 

@@ -51,6 +51,10 @@ const (
 	HelmValuesHubSubpath = "hub"
 	// HelmValuesTagSubpath is the subpath from the component root to the tag parameter.
 	HelmValuesTagSubpath = "tag"
+	// default ingress gateway name
+	defaultIngressGWName = "istio-ingressgateway"
+	// default egress gateway name
+	defaultEgressGWName = "istio-egressgateway"
 )
 
 var scope = log.RegisterScope("translator", "API translator", 0)
@@ -69,6 +73,9 @@ type Translator struct {
 	GlobalNamespaces map[name.ComponentName]string `yaml:"globalNamespaces"`
 	// ComponentMaps is a set of mappings for each Istio component.
 	ComponentMaps map[name.ComponentName]*ComponentMaps `yaml:"componentMaps"`
+	// checkedDeprecatedAutoscalingFields represents whether the translator already checked the deprecated fields already.
+	// Different components do not need to rerun the translation logic
+	checkedDeprecatedAutoscalingFields bool
 }
 
 // ComponentMaps is a set of mappings for an Istio component.
@@ -211,19 +218,7 @@ func (t *Translator) OverlayK8sSettings(yml string, iop *v1alpha1.IstioOperatorS
 		if componentName == name.IstioBaseComponentName {
 			return "", fmt.Errorf("base component can only have k8s.overlays, not other K8s settings")
 		}
-		// for server-side apply, make sure service port has protocol defined.
-		// TODO(richardwxn): remove after https://github.com/kubernetes-sigs/structured-merge-diff/issues/130 is fixed.
 		inPathParts := strings.Split(inPath, ".")
-		if inPathParts[len(inPathParts)-1] == "Service" {
-			if msvc, ok := m.(*v1alpha1.ServiceSpec); ok {
-				for _, port := range msvc.Ports {
-					if port.Protocol == "" {
-						port.Protocol = "TCP"
-					}
-				}
-			}
-		}
-
 		outPath, err := t.renderResourceComponentPathTemplate(v.OutPath, componentName, resourceName, iop.Revision)
 		if err != nil {
 			return "", err
@@ -306,6 +301,67 @@ var componentToAutoScaleEnabledPath = map[name.ComponentName]string{
 	name.EgressComponentName:  "gateways.istio-egressgateway.autoscaleEnabled",
 }
 
+// checkDeprecatedHPAFields is a helper function to check for the deprecated fields usage in HorizontalPodAutoscalerSpec
+func checkDeprecatedHPAFields(iop *v1alpha1.IstioOperatorSpec) bool {
+	hpaSpecs := []*v1alpha1.HorizontalPodAutoscalerSpec{}
+	if iop.GetComponents().GetPilot().GetK8S().GetHpaSpec() != nil {
+		hpaSpecs = append(hpaSpecs, iop.GetComponents().GetPilot().GetK8S().GetHpaSpec())
+	}
+	for _, gwSpec := range iop.GetComponents().GetIngressGateways() {
+		if gwSpec.Name == defaultIngressGWName && gwSpec.GetK8S().GetHpaSpec() != nil {
+			hpaSpecs = append(hpaSpecs, gwSpec.GetK8S().GetHpaSpec())
+		}
+	}
+	for _, gwSpec := range iop.GetComponents().GetEgressGateways() {
+		if gwSpec.Name == defaultEgressGWName && gwSpec.GetK8S().GetHpaSpec() != nil {
+			hpaSpecs = append(hpaSpecs, gwSpec.GetK8S().GetHpaSpec())
+		}
+	}
+	for _, hpaSpec := range hpaSpecs {
+		if hpaSpec.GetMetrics() != nil {
+			for _, me := range hpaSpec.GetMetrics() {
+				// nolint: staticcheck
+				if me.GetObject().GetMetricName() != "" || me.GetObject().GetAverageValue() != nil ||
+					// nolint: staticcheck
+					me.GetObject().GetSelector() != nil || me.GetObject().GetTargetValue() != nil {
+					return true
+				}
+				// nolint: staticcheck
+				if me.GetPods().GetMetricName() != "" || me.GetPods().GetSelector() != nil ||
+					// nolint: staticcheck
+					me.GetPods().GetTargetAverageValue() != nil {
+					return true
+				}
+				// nolint: staticcheck
+				if me.GetResource().GetTargetAverageValue() != nil || me.GetResource().GetTargetAverageUtilization() != 0 {
+					return true
+				}
+				// nolint: staticcheck
+				if me.GetExternal().GetTargetAverageValue() != nil || me.GetExternal().GetTargetValue() != nil ||
+					// nolint: staticcheck
+					me.GetExternal().GetMetricName() != "" || me.GetExternal().GetMetricSelector() != nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// translateDeprecatedAutoscalingFields checks for existence of deprecated HPA fields, if found, set values.global.autoscalingv2API to false
+// It only needs to run the logic for the first component because we are setting the values.global field instead of per component ones.
+// we do not set per component values because we may want to avoid mixture of v2 and v2beta1 autoscaling templates usage
+func (t *Translator) translateDeprecatedAutoscalingFields(values map[string]interface{}, iop *v1alpha1.IstioOperatorSpec) error {
+	if t.checkedDeprecatedAutoscalingFields || checkDeprecatedHPAFields(iop) {
+		path := util.PathFromString("global.autoscalingv2API")
+		if err := tpath.WriteNode(values, path, false); err != nil {
+			return fmt.Errorf("failed to set autoscalingv2API path: %v", err)
+		}
+		t.checkedDeprecatedAutoscalingFields = true
+	}
+	return nil
+}
+
 func skipReplicaCountWithAutoscaleEnabled(iop *v1alpha1.IstioOperatorSpec, componentName name.ComponentName) bool {
 	values := iop.GetValues().AsMap()
 	path, ok := componentToAutoScaleEnabledPath[componentName]
@@ -323,7 +379,8 @@ func skipReplicaCountWithAutoscaleEnabled(iop *v1alpha1.IstioOperatorSpec, compo
 }
 
 func (t *Translator) fixMergedObjectWithCustomServicePortOverlay(oo *object.K8sObject,
-	msvc *v1alpha1.ServiceSpec, mergedObj *object.K8sObject) (*object.K8sObject, error) {
+	msvc *v1alpha1.ServiceSpec, mergedObj *object.K8sObject,
+) (*object.K8sObject, error) {
 	var basePorts []*v1.ServicePort
 	bps, _, err := unstructured.NestedSlice(oo.Unstructured(), "spec", "ports")
 	if err != nil {
@@ -466,6 +523,11 @@ func (t *Translator) ProtoToValues(ii *v1alpha1.IstioOperatorSpec) (string, erro
 
 	// Special additional handling not covered by simple translation rules.
 	if err := t.setComponentProperties(root, ii); err != nil {
+		return "", err
+	}
+
+	// Special handling of the settings of legacy fields in autoscaling/v2beta1
+	if err := t.translateDeprecatedAutoscalingFields(root, ii); err != nil {
 		return "", err
 	}
 
@@ -809,7 +871,8 @@ func renderFeatureComponentPathTemplate(tmpl string, componentName name.Componen
 // renderResourceComponentPathTemplate renders a template of the form <path>{{.ResourceName}}<path>{{.ContainerName}}<path> with
 // the supplied parameters.
 func (t *Translator) renderResourceComponentPathTemplate(tmpl string, componentName name.ComponentName,
-	resourceName, revision string) (string, error) {
+	resourceName, revision string,
+) (string, error) {
 	cn := string(componentName)
 	cmp := t.ComponentMap(cn)
 	if cmp == nil {
@@ -901,19 +964,21 @@ func MergeK8sObject(base *object.K8sObject, overlayNode interface{}, path util.P
 
 // createPatchObjectFromPath constructs patch object for node with path, returns nil object and error if the path is invalid.
 // eg. node:
-//     - name: NEW_VAR
-//       value: new_value
+//   - name: NEW_VAR
+//     value: new_value
+//
 // and path:
-//       spec.template.spec.containers.[name:discovery].env
-//     will constructs the following patch object:
-//       spec:
-//         template:
-//           spec:
-//             containers:
-//             - name: discovery
-//               env:
-//               - name: NEW_VAR
-//                 value: new_value
+//
+//	  spec.template.spec.containers.[name:discovery].env
+//	will constructs the following patch object:
+//	  spec:
+//	    template:
+//	      spec:
+//	        containers:
+//	        - name: discovery
+//	          env:
+//	          - name: NEW_VAR
+//	            value: new_value
 func createPatchObjectFromPath(node interface{}, path util.Path) (map[string]interface{}, error) {
 	if len(path) == 0 {
 		return nil, fmt.Errorf("empty path %s", path)

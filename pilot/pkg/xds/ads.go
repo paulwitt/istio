@@ -27,7 +27,7 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
-	"istio.io/istio/pilot/pkg/controller/workloadentry"
+	"istio.io/istio/pilot/pkg/autoregistration"
 	"istio.io/istio/pilot/pkg/features"
 	istiogrpc "istio.io/istio/pilot/pkg/grpc"
 	"istio.io/istio/pilot/pkg/model"
@@ -188,6 +188,9 @@ func (s *DiscoveryServer) receive(con *Connection, identities []string) {
 // handles 'push' requests and close - the code will eventually call the 'push' code, and it needs more mutex
 // protection. Original code avoided the mutexes by doing both 'push' and 'process requests' in same thread.
 func (s *DiscoveryServer) processRequest(req *discovery.DiscoveryRequest, con *Connection) error {
+	stype := v3.GetShortType(req.TypeUrl)
+	log.Debugf("ADS:%s: REQUEST %s verson received, %s nonce received %s", stype,
+		con.conID, req.VersionInfo, req.ResponseNonce)
 	if req.TypeUrl == v3.HealthInfoType {
 		s.handleWorkloadHealthcheck(con.proxy, req)
 		return nil
@@ -302,6 +305,27 @@ func (s *DiscoveryServer) Stream(stream DiscoveryStream) error {
 	<-con.initialized
 
 	for {
+		// Go select{} statements are not ordered; the same channel can be chosen many times.
+		// For requests, these are higher priority (client may be blocked on startup until these are done)
+		// and often very cheap to handle (simple ACK), so we check it first.
+		select {
+		case req, ok := <-con.reqChan:
+			if ok {
+				if err := s.processRequest(req, con); err != nil {
+					return err
+				}
+			} else {
+				// Remote side closed connection or error processing the request.
+				return <-con.errorChan
+			}
+		case <-con.stop:
+			return nil
+		default:
+		}
+		// If there wasn't already a request, poll for requests and pushes. Note: if we have a huge
+		// amount of incoming requests, we may still send some pushes, as we do not `continue` above;
+		// however, requests will be handled ~2x as much as pushes. This ensures a wave of requests
+		// cannot completely starve pushes. However, this scenario is unlikely.
 		select {
 		case req, ok := <-con.reqChan:
 			if ok {
@@ -580,7 +604,7 @@ func (s *DiscoveryServer) initializeProxy(node *core.Node, con *Connection) erro
 	// add topology labels to proxy metadata labels
 	proxy.Metadata.Labels = labelutil.AugmentLabels(proxy.Metadata.Labels, proxy.Metadata.ClusterID, locality, proxy.Metadata.Network)
 	// Discover supported IP Versions of proxy so that appropriate config can be delivered.
-	proxy.DiscoverIPVersions()
+	proxy.DiscoverIPMode()
 
 	proxy.WatchedResources = map[string]*model.WatchedResource{}
 	// Based on node metadata and version, we can associate a different generator.
@@ -628,7 +652,7 @@ func (s *DiscoveryServer) computeProxyState(proxy *model.Proxy, request *model.P
 			switch conf.Kind {
 			case gvk.ServiceEntry, gvk.DestinationRule, gvk.VirtualService, gvk.Sidecar, gvk.HTTPRoute, gvk.TCPRoute:
 				sidecar = true
-			case gvk.Gateway, gvk.KubernetesGateway, gvk.GatewayClass:
+			case gvk.Gateway, gvk.KubernetesGateway, gvk.GatewayClass, gvk.ReferencePolicy:
 				gateway = true
 			case gvk.Ingress:
 				sidecar = true
@@ -656,7 +680,7 @@ func (s *DiscoveryServer) computeProxyState(proxy *model.Proxy, request *model.P
 // handleWorkloadHealthcheck processes HealthInformation type Url.
 func (s *DiscoveryServer) handleWorkloadHealthcheck(proxy *model.Proxy, req *discovery.DiscoveryRequest) {
 	if features.WorkloadEntryHealthChecks {
-		event := workloadentry.HealthEvent{}
+		event := autoregistration.HealthEvent{}
 		event.Healthy = req.ErrorDetail == nil
 		if !event.Healthy {
 			event.Message = req.ErrorDetail.Message
@@ -868,18 +892,6 @@ func (conn *Connection) send(res *discovery.DiscoveryResponse) error {
 		xdsResponseWriteTimeouts.Increment()
 	}
 	return err
-}
-
-// nolint
-// Synced checks if the type has been synced, meaning the most recent push was ACKed
-func (conn *Connection) Synced(typeUrl string) (bool, bool) {
-	conn.proxy.RLock()
-	defer conn.proxy.RUnlock()
-	acked := conn.proxy.WatchedResources[typeUrl].NonceAcked
-	sent := conn.proxy.WatchedResources[typeUrl].NonceSent
-	nacked := conn.proxy.WatchedResources[typeUrl].NonceNacked != ""
-	sendTime := conn.proxy.WatchedResources[typeUrl].LastSent
-	return nacked || acked == sent, time.Since(sendTime) > features.FlowControlTimeout
 }
 
 // nolint

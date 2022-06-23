@@ -97,8 +97,9 @@ func EnqueueForParentHandler(q Queue, kind config.GroupVersionKind) func(obj Obj
 			if refGV == kind.Kubernetes().GroupVersion() {
 				// We found a parent we care about, add it to the queue
 				q.Add(types.NamespacedName{
+					// Reference doesn't have namespace, but its always same-namespace, so use objects
 					Namespace: obj.GetNamespace(),
-					Name:      obj.GetName(),
+					Name:      ref.Name,
 				})
 			}
 		}
@@ -155,12 +156,12 @@ func filteredObjectHandler(handler func(o Object), onlyIncludeSpecChanges bool, 
 	}
 	return cache.ResourceEventHandlerFuncs{
 		AddFunc: single,
-		UpdateFunc: func(oldInterface, newInterace interface{}) {
+		UpdateFunc: func(oldInterface, newInterface interface{}) {
 			oldObj := extractObject(oldInterface)
 			if oldObj == nil {
 				return
 			}
-			newObj := extractObject(newInterace)
+			newObj := extractObject(newInterface)
 			if newObj == nil {
 				return
 			}

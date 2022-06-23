@@ -49,14 +49,15 @@ var (
 )
 
 type instance struct {
-	id          resource.ID
-	cfg         echo.Config
-	clusterIP   string
-	clusterIPs  []string
-	ctx         resource.Context
-	cluster     cluster.Cluster
-	workloadMgr *workloadManager
-	deployment  *deployment
+	id             resource.ID
+	cfg            echo.Config
+	clusterIP      string
+	clusterIPs     []string
+	ctx            resource.Context
+	cluster        cluster.Cluster
+	workloadMgr    *workloadManager
+	deployment     *deployment
+	workloadFilter []echo.Workload
 }
 
 func newInstance(ctx resource.Context, originalCfg echo.Config) (out *instance, err error) {
@@ -85,7 +86,7 @@ func newInstance(ctx resource.Context, originalCfg echo.Config) (out *instance, 
 	c.id = ctx.TrackResource(c)
 
 	// Now retrieve the service information to find the ClusterIP
-	s, err := c.cluster.CoreV1().Services(cfg.Namespace.Name()).Get(context.TODO(), cfg.Service, metav1.GetOptions{})
+	s, err := c.cluster.Kube().CoreV1().Services(cfg.Namespace.Name()).Get(context.TODO(), cfg.Service, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +125,24 @@ func (c *instance) Addresses() []string {
 }
 
 func (c *instance) Workloads() (echo.Workloads, error) {
-	return c.workloadMgr.ReadyWorkloads()
+	wls, err := c.workloadMgr.ReadyWorkloads()
+	if err != nil {
+		return nil, err
+	}
+	var final []echo.Workload
+	for _, wl := range wls {
+		filtered := false
+		for _, filter := range c.workloadFilter {
+			if wl.Address() != filter.Address() {
+				filtered = true
+				break
+			}
+		}
+		if !filtered {
+			final = append(final, wl)
+		}
+	}
+	return final, nil
 }
 
 func (c *instance) WorkloadsOrFail(t test.Failer) echo.Workloads {
@@ -152,14 +170,6 @@ func (c *instance) Instances() echo.Instances {
 	return echo.Instances{c}
 }
 
-func (c *instance) firstClient() (*echoClient.Client, error) {
-	workloads, err := c.Workloads()
-	if err != nil {
-		return nil, err
-	}
-	return workloads[0].(*workload).Client()
-}
-
 func (c *instance) Close() (err error) {
 	return c.workloadMgr.Close()
 }
@@ -172,8 +182,34 @@ func (c *instance) PortForName(name string) echo.Port {
 	return c.cfg.Ports.MustForName(name)
 }
 
+func (c *instance) ServiceName() string {
+	return c.cfg.Service
+}
+
+func (c *instance) NamespaceName() string {
+	return c.cfg.NamespaceName()
+}
+
+func (c *instance) ServiceAccountName() string {
+	return c.cfg.ServiceAccountName()
+}
+
+func (c *instance) ClusterLocalFQDN() string {
+	return c.cfg.ClusterLocalFQDN()
+}
+
+func (c *instance) ClusterSetLocalFQDN() string {
+	return c.cfg.ClusterSetLocalFQDN()
+}
+
 func (c *instance) Config() echo.Config {
 	return c.cfg
+}
+
+func (c *instance) WithWorkloads(wls ...echo.Workload) echo.Instance {
+	n := *c
+	c.workloadFilter = wls
+	return &n
 }
 
 func (c *instance) Cluster() cluster.Cluster {

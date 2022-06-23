@@ -328,6 +328,10 @@ func instanceKey(i echo.Instance) string {
 // fakeInstance wraps echo.Config for test-framework internals tests where we don't actually make calls
 type fakeInstance echo.Config
 
+func (f fakeInstance) WithWorkloads(wl ...echo.Workload) echo.Instance {
+	panic("implement me")
+}
+
 func (f fakeInstance) Instances() echo.Instances {
 	return echo.Instances{f}
 }
@@ -348,6 +352,26 @@ func (f fakeInstance) Config() echo.Config {
 	cfg := echo.Config(f)
 	_ = cfg.FillDefaults(nil)
 	return cfg
+}
+
+func (f fakeInstance) ServiceName() string {
+	return f.Config().Service
+}
+
+func (f fakeInstance) NamespaceName() string {
+	return f.Config().NamespaceName()
+}
+
+func (f fakeInstance) ServiceAccountName() string {
+	return f.Config().ServiceAccountName()
+}
+
+func (f fakeInstance) ClusterLocalFQDN() string {
+	return f.Config().ClusterLocalFQDN()
+}
+
+func (f fakeInstance) ClusterSetLocalFQDN() string {
+	return f.Config().ClusterSetLocalFQDN()
 }
 
 func (f fakeInstance) Address() string {

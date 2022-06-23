@@ -20,6 +20,8 @@ import (
 
 	"istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/model"
+	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/tunnelingconfig"
+	"istio.io/istio/pilot/pkg/networking/telemetry"
 	"istio.io/istio/pilot/pkg/networking/util"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/host"
@@ -93,7 +95,8 @@ func hashRuntimeTLSMatchPredicates(match *v1alpha3.TLSMatchAttributes) string {
 
 func buildSidecarOutboundTLSFilterChainOpts(node *model.Proxy, push *model.PushContext, destinationCIDR string,
 	service *model.Service, bind string, listenPort *model.Port,
-	gateways map[string]bool, configs []config.Config) []*filterChainOpts {
+	gateways map[string]bool, configs []config.Config,
+) []*filterChainOpts {
 	if !listenPort.Protocol.IsTLS() {
 		return nil
 	}
@@ -175,7 +178,7 @@ func buildSidecarOutboundTLSFilterChainOpts(node *model.Proxy, push *model.PushC
 		statPrefix := clusterName
 		// If stat name is configured, use it to build the stat prefix.
 		if len(push.Mesh.OutboundClusterStatName) != 0 {
-			statPrefix = util.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), "", &model.Port{Port: port}, &service.Attributes)
+			statPrefix = telemetry.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), "", &model.Port{Port: port}, &service.Attributes)
 		}
 		// Use the hostname as the SNI value if and only:
 		// 1) if the destination is a CIDR;
@@ -202,7 +205,8 @@ func buildSidecarOutboundTLSFilterChainOpts(node *model.Proxy, push *model.PushC
 		out = append(out, &filterChainOpts{
 			sniHosts:         sniHosts,
 			destinationCIDRs: []string{destinationCIDR},
-			networkFilters:   buildOutboundNetworkFiltersWithSingleDestination(push, node, statPrefix, clusterName, "", listenPort, destinationRule),
+			networkFilters: buildOutboundNetworkFiltersWithSingleDestination(push, node, statPrefix, clusterName, "",
+				listenPort, destinationRule, tunnelingconfig.Apply),
 		})
 	}
 
@@ -211,7 +215,8 @@ func buildSidecarOutboundTLSFilterChainOpts(node *model.Proxy, push *model.PushC
 
 func buildSidecarOutboundTCPFilterChainOpts(node *model.Proxy, push *model.PushContext, destinationCIDR string,
 	service *model.Service, listenPort *model.Port,
-	gateways map[string]bool, configs []config.Config) []*filterChainOpts {
+	gateways map[string]bool, configs []config.Config,
+) []*filterChainOpts {
 	if listenPort.Protocol.IsTLS() {
 		return nil
 	}
@@ -304,11 +309,12 @@ TcpLoop:
 			model.TrafficDirectionOutbound, node, service.Hostname))
 		// If stat name is configured, use it to build the stat prefix.
 		if len(push.Mesh.OutboundClusterStatName) != 0 {
-			statPrefix = util.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), "", &model.Port{Port: port}, &service.Attributes)
+			statPrefix = telemetry.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), "", &model.Port{Port: port}, &service.Attributes)
 		}
 		out = append(out, &filterChainOpts{
 			destinationCIDRs: []string{destinationCIDR},
-			networkFilters:   buildOutboundNetworkFiltersWithSingleDestination(push, node, statPrefix, clusterName, "", listenPort, destinationRule),
+			networkFilters: buildOutboundNetworkFiltersWithSingleDestination(push, node, statPrefix, clusterName, "",
+				listenPort, destinationRule, tunnelingconfig.Apply),
 		})
 	}
 
@@ -321,7 +327,8 @@ TcpLoop:
 // missing service throughout this file
 func buildSidecarOutboundTCPTLSFilterChainOpts(node *model.Proxy, push *model.PushContext,
 	configs []config.Config, destinationCIDR string, service *model.Service, bind string, listenPort *model.Port,
-	gateways map[string]bool) []*filterChainOpts {
+	gateways map[string]bool,
+) []*filterChainOpts {
 	out := make([]*filterChainOpts, 0)
 	var svcConfigs []config.Config
 	if service != nil {

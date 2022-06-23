@@ -151,6 +151,14 @@ func (c MockClient) EnvoyDo(ctx context.Context, podName, podNamespace, method, 
 	return results, nil
 }
 
+func (c MockClient) EnvoyDoWithPort(ctx context.Context, podName, podNamespace, method, path string, port int) ([]byte, error) {
+	results, ok := c.Results[podName]
+	if !ok {
+		return nil, fmt.Errorf("unable to retrieve Pod: pods %q not found", podName)
+	}
+	return results, nil
+}
+
 func (c MockClient) RESTConfig() *rest.Config {
 	return c.ConfigValue
 }
@@ -204,7 +212,8 @@ func (c MockClient) ApplyYAMLFilesDryRun(string, ...string) error {
 
 // CreatePerRPCCredentials -- when implemented -- mocks per-RPC credentials (bearer token)
 func (c MockClient) CreatePerRPCCredentials(ctx context.Context, tokenNamespace, tokenServiceAccount string, audiences []string,
-	expirationSeconds int64) (credentials.PerRPCCredentials, error) {
+	expirationSeconds int64,
+) (credentials.PerRPCCredentials, error) {
 	panic("not implemented by mock")
 }
 

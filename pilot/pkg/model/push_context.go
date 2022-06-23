@@ -31,7 +31,6 @@ import (
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/features"
-	"istio.io/istio/pilot/pkg/serviceregistry/provider"
 	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
@@ -245,6 +244,8 @@ type PushContext struct {
 	// this is mainly used for kubernetes multi-cluster scenario
 	networkMgr *NetworkManager
 
+	Networks *meshconfig.MeshNetworks
+
 	InitDone        atomic.Bool
 	initializeMutex sync.Mutex
 }
@@ -305,32 +306,6 @@ type XDSUpdater interface {
 
 	// RemoveShard removes all endpoints for the given shard key
 	RemoveShard(shardKey ShardKey)
-}
-
-// shardRegistry is a simplified interface for registries that can produce a shard key
-type shardRegistry interface {
-	Cluster() cluster.ID
-	Provider() provider.ID
-}
-
-func NewShardKey(cluster cluster.ID, provider provider.ID) ShardKey {
-	return ShardKey(fmt.Sprintf("%s/%s", cluster, provider))
-}
-
-// ShardKeyFromRegistry computes the shard key based on provider type and cluster id.
-func ShardKeyFromRegistry(instance shardRegistry) ShardKey {
-	return NewShardKey(instance.Cluster(), instance.Provider())
-}
-
-// ShardKey is the key for EndpointShards made of a key with the format "cluster/provider"
-type ShardKey string
-
-func (sk ShardKey) Cluster() cluster.ID {
-	p := strings.Split(string(sk), "/")
-	if len(p) < 1 {
-		return ""
-	}
-	return cluster.ID(p[0])
 }
 
 // PushRequest defines a request to push to proxies
@@ -711,34 +686,47 @@ func (ps *PushContext) UpdateMetrics() {
 }
 
 // It is called after virtual service short host name is resolved to FQDN
-func virtualServiceDestinationHosts(v *networking.VirtualService) []string {
+func virtualServiceDestinations(v *networking.VirtualService) map[string]sets.IntSet {
 	if v == nil {
 		return nil
 	}
 
-	var out []string
+	out := make(map[string]sets.IntSet)
+
+	addDestination := func(host string, port *networking.PortSelector) {
+		if _, ok := out[host]; !ok {
+			out[host] = make(sets.IntSet)
+		}
+		if port != nil {
+			out[host].Insert(int(port.Number))
+		} else {
+			// Use the value 0 as a sentinel indicating that one of the destinations
+			// in the Virtual Service does not specify a port for this host.
+			out[host].Insert(0)
+		}
+	}
 
 	for _, h := range v.Http {
 		for _, r := range h.Route {
 			if r.Destination != nil {
-				out = append(out, r.Destination.Host)
+				addDestination(r.Destination.Host, r.Destination.GetPort())
 			}
 		}
 		if h.Mirror != nil {
-			out = append(out, h.Mirror.Host)
+			addDestination(h.Mirror.Host, h.Mirror.GetPort())
 		}
 	}
 	for _, t := range v.Tcp {
 		for _, r := range t.Route {
 			if r.Destination != nil {
-				out = append(out, r.Destination.Host)
+				addDestination(r.Destination.Host, r.Destination.GetPort())
 			}
 		}
 	}
 	for _, t := range v.Tls {
 		for _, r := range t.Route {
 			if r.Destination != nil {
-				out = append(out, r.Destination.Host)
+				addDestination(r.Destination.Host, r.Destination.GetPort())
 			}
 		}
 	}
@@ -766,7 +754,7 @@ func (ps *PushContext) GatewayServices(proxy *Proxy) []*Service {
 				return svcs
 			}
 
-			for _, host := range virtualServiceDestinationHosts(vs) {
+			for host := range virtualServiceDestinations(vs) {
 				hostsFromGateways.Insert(host)
 			}
 		}
@@ -1130,6 +1118,7 @@ func (ps *PushContext) InitContext(env *Environment, oldPushContext *PushContext
 	}
 
 	ps.Mesh = env.Mesh()
+	ps.Networks = env.MeshNetworks()
 	ps.LedgerVersion = env.Version()
 
 	// Must be initialized first
@@ -1212,7 +1201,8 @@ func (ps *PushContext) createNewContext(env *Environment) error {
 func (ps *PushContext) updateContext(
 	env *Environment,
 	oldPushContext *PushContext,
-	pushReq *PushRequest) error {
+	pushReq *PushRequest,
+) error {
 	var servicesChanged, virtualServicesChanged, destinationRulesChanged, gatewayChanged,
 		authnChanged, authzChanged, envoyFiltersChanged, sidecarsChanged, telemetryChanged, gatewayAPIChanged,
 		wasmPluginsChanged, proxyConfigsChanged bool
@@ -1614,13 +1604,11 @@ func (ps *PushContext) initSidecarScopes(env *Environment) error {
 
 	sidecarConfigWithSelector := make([]config.Config, 0)
 	sidecarConfigWithoutSelector := make([]config.Config, 0)
-	sidecarsWithoutSelectorByNamespace := sets.New()
 	for _, sidecarConfig := range sidecarConfigs {
 		sidecar := sidecarConfig.Spec.(*networking.Sidecar)
 		if sidecar.WorkloadSelector != nil {
 			sidecarConfigWithSelector = append(sidecarConfigWithSelector, sidecarConfig)
 		} else {
-			sidecarsWithoutSelectorByNamespace.Insert(sidecarConfig.Namespace)
 			sidecarConfigWithoutSelector = append(sidecarConfigWithoutSelector, sidecarConfig)
 		}
 	}
@@ -1708,6 +1696,8 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
 			for _, e := range rule.ExportTo {
 				exportToMap[visibility.Instance(e)] = true
 			}
+		} else {
+			exportToMap[visibility.Private] = true
 		}
 
 		// add only if the dest rule is exported with . or * or explicit exportTo containing this namespace
@@ -1728,14 +1718,9 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
 		isPrivateOnly := false
 		// No exportTo in destinationRule. Use the global default
 		// We only honor . and *
-		if len(rule.ExportTo) == 0 && ps.exportToDefaults.destinationRule[visibility.Private] {
+		if len(exportToMap) == 0 && ps.exportToDefaults.destinationRule[visibility.Private] {
 			isPrivateOnly = true
-		} else if len(rule.ExportTo) == 1 && (exportToMap[visibility.Private]) {
-			isPrivateOnly = true
-		}
-
-		// If destination rule has a workloadSelector set, visibility should be private.
-		if rule.GetWorkloadSelector() != nil {
+		} else if len(exportToMap) == 1 && (exportToMap[visibility.Private] || exportToMap[visibility.Instance(configs[i].Namespace)]) {
 			isPrivateOnly = true
 		}
 
@@ -1795,7 +1780,7 @@ func (ps *PushContext) initTelemetry(env *Environment) (err error) {
 
 func (ps *PushContext) initProxyConfigs(env *Environment) error {
 	var err error
-	if ps.ProxyConfigs, err = GetProxyConfigs(env.IstioConfigStore, env.Mesh()); err != nil {
+	if ps.ProxyConfigs, err = GetProxyConfigs(env.ConfigStore, env.Mesh()); err != nil {
 		pclog.Errorf("failed to initialize proxy configs: %v", err)
 		return err
 	}

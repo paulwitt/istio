@@ -49,6 +49,7 @@ import (
 	"istio.io/istio/pkg/config/labels"
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/gvk"
+	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/util/assert"
 )
 
@@ -1784,6 +1785,7 @@ func TestBuildUpstreamClusterTLSContext(t *testing.T) {
 		h2                       bool
 		router                   bool
 		result                   expectedResult
+		enableAutoSni            bool
 		enableVerifyCertAtClient bool
 	}{
 		{
@@ -1973,7 +1975,7 @@ func TestBuildUpstreamClusterTLSContext(t *testing.T) {
 			},
 		},
 		{
-			name: "tls mode SIMPLE, with VerifyCert enabled and no sni specified in tls",
+			name: "tls mode SIMPLE, with AutoSni enabled and no sni specified in tls",
 			opts: &buildClusterOpts{
 				mutable: newTestCluster(),
 			},
@@ -1994,10 +1996,10 @@ func TestBuildUpstreamClusterTLSContext(t *testing.T) {
 				},
 				err: nil,
 			},
-			enableVerifyCertAtClient: true,
+			enableAutoSni: true,
 		},
 		{
-			name: "tls mode SIMPLE, with VerifyCert enabled and sni specified in tls",
+			name: "tls mode SIMPLE, with AutoSni enabled and sni specified in tls",
 			opts: &buildClusterOpts{
 				mutable: newTestCluster(),
 			},
@@ -2020,6 +2022,59 @@ func TestBuildUpstreamClusterTLSContext(t *testing.T) {
 				},
 				err: nil,
 			},
+			enableAutoSni: true,
+		},
+		{
+			name: "tls mode SIMPLE, with VerifyCert and AutoSni enabled with SubjectAltNames set",
+			opts: &buildClusterOpts{
+				mutable: newTestCluster(),
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:            networking.ClientTLSSettings_SIMPLE,
+				SubjectAltNames: []string{"SAN"},
+				Sni:             "some-sni.com",
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						TlsParams: &tls.TlsParameters{
+							// if not specified, envoy use TLSv1_2 as default for client.
+							TlsMaximumProtocolVersion: tls.TlsParameters_TLSv1_3,
+							TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_2,
+						},
+						ValidationContextType: &tls.CommonTlsContext_ValidationContext{},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+			enableAutoSni:            true,
+			enableVerifyCertAtClient: true,
+		},
+		{
+			name: "tls mode SIMPLE, with VerifyCert and AutoSni enabled without SubjectAltNames set",
+			opts: &buildClusterOpts{
+				mutable: newTestCluster(),
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode: networking.ClientTLSSettings_SIMPLE,
+				Sni:  "some-sni.com",
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						TlsParams: &tls.TlsParameters{
+							// if not specified, envoy use TLSv1_2 as default for client.
+							TlsMaximumProtocolVersion: tls.TlsParameters_TLSv1_3,
+							TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_2,
+						},
+						ValidationContextType: &tls.CommonTlsContext_ValidationContext{},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+			enableAutoSni:            true,
 			enableVerifyCertAtClient: true,
 		},
 		{
@@ -2564,10 +2619,91 @@ func TestBuildUpstreamClusterTLSContext(t *testing.T) {
 				nil,
 			},
 		},
+		{
+			name: "tls mode SIMPLE, CredentialName is set with proxy type Sidecar and destinationRule has workload Selector",
+			opts: &buildClusterOpts{
+				mutable:          newTestCluster(),
+				isDrWithSelector: true,
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:            networking.ClientTLSSettings_SIMPLE,
+				CredentialName:  credentialName,
+				SubjectAltNames: []string{"SAN"},
+				Sni:             "some-sni.com",
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						TlsParams: &tls.TlsParameters{
+							// if not specified, envoy use TLSv1_2 as default for client.
+							TlsMaximumProtocolVersion: tls.TlsParameters_TLSv1_3,
+							TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_2,
+						},
+						ValidationContextType: &tls.CommonTlsContext_CombinedValidationContext{
+							CombinedValidationContext: &tls.CommonTlsContext_CombinedCertificateValidationContext{
+								DefaultValidationContext: &tls.CertificateValidationContext{
+									MatchSubjectAltNames: util.StringToExactMatch([]string{"SAN"}),
+								},
+								ValidationContextSdsSecretConfig: &tls.SdsSecretConfig{
+									Name:      "kubernetes://" + credentialName + authn_model.SdsCaSuffix,
+									SdsConfig: authn_model.SDSAdsConfig,
+								},
+							},
+						},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode MUTUAL, CredentialName is set with proxy type Sidecar and destinationRule has workload Selector",
+			opts: &buildClusterOpts{
+				mutable:          newTestCluster(),
+				isDrWithSelector: true,
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:            networking.ClientTLSSettings_MUTUAL,
+				CredentialName:  credentialName,
+				SubjectAltNames: []string{"SAN"},
+				Sni:             "some-sni.com",
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						TlsParams: &tls.TlsParameters{
+							// if not specified, envoy use TLSv1_2 as default for client.
+							TlsMaximumProtocolVersion: tls.TlsParameters_TLSv1_3,
+							TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_2,
+						},
+						TlsCertificateSdsSecretConfigs: []*tls.SdsSecretConfig{
+							{
+								Name:      "kubernetes://" + credentialName,
+								SdsConfig: authn_model.SDSAdsConfig,
+							},
+						},
+						ValidationContextType: &tls.CommonTlsContext_CombinedValidationContext{
+							CombinedValidationContext: &tls.CommonTlsContext_CombinedCertificateValidationContext{
+								DefaultValidationContext: &tls.CertificateValidationContext{
+									MatchSubjectAltNames: util.StringToExactMatch([]string{"SAN"}),
+								},
+								ValidationContextSdsSecretConfig: &tls.SdsSecretConfig{
+									Name:      "kubernetes://" + credentialName + authn_model.SdsCaSuffix,
+									SdsConfig: authn_model.SDSAdsConfig,
+								},
+							},
+						},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			features.VerifyCertAtClient = tc.enableVerifyCertAtClient
+			test.SetBoolForTest(t, &features.EnableAutoSni, tc.enableAutoSni)
+			test.SetBoolForTest(t, &features.VerifyCertAtClient, tc.enableVerifyCertAtClient)
 			var proxy *model.Proxy
 			if tc.router {
 				proxy = newGatewayProxy()
@@ -2584,11 +2720,12 @@ func TestBuildUpstreamClusterTLSContext(t *testing.T) {
 			} else if diff := cmp.Diff(tc.result.tlsContext, ret, protocmp.Transform()); diff != "" {
 				t.Errorf("got diff: `%v", diff)
 			}
-			if tc.enableVerifyCertAtClient {
+			if tc.enableAutoSni {
 				if len(tc.tls.Sni) == 0 {
 					assert.Equal(t, tc.opts.mutable.httpProtocolOptions.UpstreamHttpProtocolOptions.AutoSni, true)
-				} else if tc.opts.mutable.httpProtocolOptions != nil {
-					t.Errorf("expecting nil httpProtocolOptions but got %v", tc.opts.mutable.httpProtocolOptions)
+				}
+				if tc.enableVerifyCertAtClient && len(tc.tls.SubjectAltNames) == 0 {
+					assert.Equal(t, tc.opts.mutable.httpProtocolOptions.UpstreamHttpProtocolOptions.AutoSanValidation, true)
 				}
 			}
 		})
@@ -2763,7 +2900,7 @@ func TestIsHttp2Cluster(t *testing.T) {
 	tests := []struct {
 		name           string
 		cluster        *MutableCluster
-		isHttp2Cluster bool
+		isHttp2Cluster bool // revive:disable-line
 	}{
 		{
 			name:           "with no h2 options",
@@ -2786,7 +2923,7 @@ func TestIsHttp2Cluster(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			isHttp2Cluster := cb.IsHttp2Cluster(test.cluster)
+			isHttp2Cluster := cb.isHttp2Cluster(test.cluster) // revive:disable-line
 			if isHttp2Cluster != test.isHttp2Cluster {
 				t.Errorf("got: %t, want: %t", isHttp2Cluster, test.isHttp2Cluster)
 			}
@@ -2974,9 +3111,6 @@ func TestBuildAutoMtlsSettings(t *testing.T) {
 }
 
 func TestApplyDestinationRuleOSCACert(t *testing.T) {
-	defer func() {
-		features.VerifyCertAtClient = false
-	}()
 	servicePort := model.PortList{
 		&model.Port{
 			Name:     "default",
@@ -3136,7 +3270,7 @@ func TestApplyDestinationRuleOSCACert(t *testing.T) {
 
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			features.VerifyCertAtClient = tt.enableVerifyCertAtClient
+			test.SetBoolForTest(t, &features.VerifyCertAtClient, tt.enableVerifyCertAtClient)
 			instances := []*model.ServiceInstance{
 				{
 					Service:     tt.service,

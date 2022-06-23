@@ -100,7 +100,7 @@ function download_untar_istio_release() {
 function buildx-create() {
   export DOCKER_CLI_EXPERIMENTAL=enabled
   if ! docker buildx ls | grep -q container-builder; then
-    docker buildx create --driver-opt network=host,image=gcr.io/istio-testing/buildkit:v0.9.2 --name container-builder --buildkitd-flags="--debug"
+    docker buildx create --driver-opt network=host,image=gcr.io/istio-testing/buildkit:v0.10.3 --name container-builder --buildkitd-flags="--debug"
     # Pre-warm the builder. If it fails, fetch logs, but continue
     docker buildx inspect --bootstrap container-builder || docker logs buildx_buildkit_container-builder0 || true
   fi
@@ -114,7 +114,7 @@ function build_images() {
   targets="docker.pilot docker.proxyv2 "
 
   # use ubuntu:jammy to test vms by default
-  nonDistrolessTargets="docker.app docker.app_sidecar_ubuntu_jammy "
+  nonDistrolessTargets="docker.app docker.app_sidecar_ubuntu_jammy docker.ext-authz "
   if [[ "${JOB_TYPE:-presubmit}" == "postsubmit" ]]; then
     # We run tests across all VM types only in postsubmit
     nonDistrolessTargets+="docker.app_sidecar_ubuntu_xenial docker.app_sidecar_debian_11  docker.app_sidecar_centos_7 "

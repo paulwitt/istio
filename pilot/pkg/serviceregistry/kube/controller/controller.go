@@ -109,7 +109,6 @@ type Options struct {
 	// MeshServiceController is a mesh-wide service Controller.
 	MeshServiceController *aggregate.Controller
 
-	ResyncPeriod time.Duration
 	DomainSuffix string
 
 	// ClusterID identifies the remote cluster in a multicluster env.
@@ -140,24 +139,14 @@ type Options struct {
 	// Maximum burst for throttle when communicating with the kubernetes API
 	KubernetesAPIBurst int
 
-	// Duration to wait for cache syncs
-	SyncInterval time.Duration
-
-	// SyncTimeout, if set, causes HasSynced to be returned when marked true.
-	SyncTimeout *atomic.Bool
+	// SyncTimeout, if set, causes HasSynced to be returned when timeout.
+	SyncTimeout time.Duration
 
 	// If meshConfig.DiscoverySelectors are specified, the DiscoveryNamespacesFilter tracks the namespaces this controller watches.
 	DiscoveryNamespacesFilter filter.DiscoveryNamespacesFilter
 }
 
-func (o Options) GetSyncInterval() time.Duration {
-	if o.SyncInterval != 0 {
-		return o.SyncInterval
-	}
-	return time.Millisecond * 100
-}
-
-// EnableEndpointSliceController determines whether to use Endpoints or EndpointSlice based on the
+// DetectEndpointMode determines whether to use Endpoints or EndpointSlice based on the
 // feature flag and/or Kubernetes version
 func DetectEndpointMode(kubeClient kubelib.Client) EndpointMode {
 	useEndpointslice, ok := features.EnableEndpointSliceController()
@@ -341,6 +330,7 @@ func NewController(kubeClient kubelib.Client, options Options) *Controller {
 	}
 
 	c.nsInformer = kubeClient.KubeInformer().Core().V1().Namespaces().Informer()
+	_ = c.nsInformer.SetTransform(kubelib.StripUnusedFields)
 	c.nsLister = kubeClient.KubeInformer().Core().V1().Namespaces().Lister()
 	if c.opts.SystemNamespace != "" {
 		nsInformer := filter.NewFilteredSharedIndexInformer(func(obj interface{}) bool {
@@ -374,6 +364,7 @@ func NewController(kubeClient kubelib.Client, options Options) *Controller {
 
 	// This is for getting the node IPs of a selected set of nodes
 	c.nodeInformer = kubeClient.KubeInformer().Core().V1().Nodes().Informer()
+	_ = c.nodeInformer.SetTransform(kubelib.StripUnusedFields)
 	c.nodeLister = kubeClient.KubeInformer().Core().V1().Nodes().Lister()
 	c.registerHandlers(c.nodeInformer, "Nodes", c.onNodeEvent, nil)
 
@@ -508,7 +499,7 @@ func (c *Controller) Cleanup() error {
 }
 
 func (c *Controller) onServiceEvent(curr interface{}, event model.Event) error {
-	svc, err := convertToService(curr)
+	svc, err := extractService(curr)
 	if err != nil {
 		log.Errorf(err)
 		return nil
@@ -577,6 +568,8 @@ func (c *Controller) addOrUpdateService(svc *v1.Service, svcConv *model.Service,
 	}
 	c.Unlock()
 
+	// This full push needed to update ALL ends endpoints, even though we do a full push on service add/update
+	// as that full push is only triggered for the specific service.
 	if needsFullPush {
 		// networks are different, we need to update all eds endpoints
 		c.opts.XDSUpdater.ConfigUpdate(&model.PushRequest{Full: true, Reason: []model.TriggerReason{model.NetworksTrigger}})
@@ -730,7 +723,7 @@ func tryGetLatestObject(informer filter.FilteredSharedIndexInformer, obj interfa
 
 // HasSynced returns true after the initial state synchronization
 func (c *Controller) HasSynced() bool {
-	return (c.opts.SyncTimeout != nil && c.opts.SyncTimeout.Load()) || c.initialSync.Load()
+	return c.initialSync.Load()
 }
 
 func (c *Controller) informersSynced() bool {
@@ -829,6 +822,14 @@ func (c *Controller) syncEndpoints() error {
 
 // Run all controllers until a signal is received
 func (c *Controller) Run(stop <-chan struct{}) {
+	if c.opts.SyncTimeout != 0 {
+		time.AfterFunc(c.opts.SyncTimeout, func() {
+			if !c.informerInit.Load() {
+				log.Warnf("kube controller for %s initial sync timed out", c.opts.ClusterID)
+				c.informerInit.Store(true)
+			}
+		})
+	}
 	st := time.Now()
 	if c.opts.NetworksWatcher != nil {
 		c.opts.NetworksWatcher.AddNetworksHandler(c.reloadNetworkLookup)
@@ -837,7 +838,7 @@ func (c *Controller) Run(stop <-chan struct{}) {
 	}
 	c.informerInit.Store(true)
 
-	kubelib.WaitForCacheSyncInterval(stop, c.opts.GetSyncInterval(), c.informersSynced)
+	kubelib.WaitForCacheSync(stop, c.informersSynced)
 	// after informer caches sync the first time, process resources in order
 	if err := c.SyncAll(); err != nil {
 		log.Errorf("one or more errors force-syncing resources: %v", err)
@@ -998,7 +999,8 @@ func (c *Controller) serviceInstancesFromWorkloadInstances(svc *model.Service, r
 }
 
 func serviceInstanceFromWorkloadInstance(svc *model.Service, servicePort *model.Port,
-	targetPort serviceTargetPort, wi *model.WorkloadInstance) *model.ServiceInstance {
+	targetPort serviceTargetPort, wi *model.WorkloadInstance,
+) *model.ServiceInstance {
 	// create an instance with endpoint whose service port name matches
 	istioEndpoint := *wi.Endpoint
 
@@ -1314,7 +1316,8 @@ func (c *Controller) getProxyServiceInstancesFromMetadata(proxy *model.Proxy) ([
 }
 
 func (c *Controller) getProxyServiceInstancesByPod(pod *v1.Pod,
-	service *v1.Service, proxy *model.Proxy) []*model.ServiceInstance {
+	service *v1.Service, proxy *model.Proxy,
+) []*model.ServiceInstance {
 	var out []*model.ServiceInstance
 
 	for _, svc := range c.servicesForNamespacedName(kube.NamespacedNameForK8sObject(service)) {

@@ -35,6 +35,7 @@ import (
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	istionetworking "istio.io/istio/pilot/pkg/networking"
 	"istio.io/istio/pilot/pkg/trustbundle"
+	networkutil "istio.io/istio/pilot/pkg/util/network"
 	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/host"
@@ -55,7 +56,7 @@ type Environment struct {
 	ServiceDiscovery
 
 	// Config interface for listing routing rules
-	IstioConfigStore
+	ConfigStore
 
 	// Watcher is the watcher for the mesh config (to be merged into the config store)
 	mesh.Watcher
@@ -93,6 +94,13 @@ type Environment struct {
 func (e *Environment) Mesh() *meshconfig.MeshConfig {
 	if e != nil && e.Watcher != nil {
 		return e.Watcher.Mesh()
+	}
+	return nil
+}
+
+func (e *Environment) MeshNetworks() *meshconfig.MeshNetworks {
+	if e != nil && e.NetworksWatcher != nil {
+		return e.NetworksWatcher.Networks()
 	}
 	return nil
 }
@@ -142,7 +150,7 @@ func (e *Environment) Version() string {
 func (e *Environment) Init() {
 	// Use a default DomainSuffix, if none was provided.
 	if len(e.DomainSuffix) == 0 {
-		e.DomainSuffix = constants.DefaultKubernetesDomain
+		e.DomainSuffix = constants.DefaultClusterLocalDomain
 	}
 
 	// Create the cluster-local service registry.
@@ -279,11 +287,8 @@ type Proxy struct {
 	// are not part of an Istio identity and thus are not verified.
 	VerifiedIdentity *spiffe.Identity
 
-	// Indicates whether proxy supports IPv6 addresses
-	ipv6Support bool
-
-	// Indicates whether proxy supports IPv4 addresses
-	ipv4Support bool
+	// IPMode of proxy.
+	ipMode IPMode
 
 	// GlobalUnicastIP stores the global unicast IP if available, otherwise nil
 	GlobalUnicastIP string
@@ -625,6 +630,9 @@ type NodeMetadata struct {
 	// redirected tcp listeners. This does not change the virtualOutbound listener.
 	OutboundListenerExactBalance StringBool `json:"OUTBOUND_LISTENER_EXACT_BALANCE,omitempty"`
 
+	// The istiod address when running ASM Managed Control Plane.
+	CloudrunAddr string `json:"CLOUDRUN_ADDR,omitempty"`
+
 	// Contains a copy of the raw metadata. This is needed to lookup arbitrary values.
 	// If a value is known ahead of time it should be added to the struct rather than reading from here,
 	Raw map[string]interface{} `json:"-"`
@@ -750,6 +758,16 @@ const (
 
 var NodeTypes = [...]NodeType{SidecarProxy, Router}
 
+// IPMode represents the IP mode of proxy.
+type IPMode int
+
+// IPMode constants starting with index 1.
+const (
+	IPv4 IPMode = iota + 1
+	IPv6
+	Dual
+)
+
 // IsApplicationNodeType verifies that the NodeType is one of the declared constants in the model
 func IsApplicationNodeType(nType NodeType) bool {
 	switch nType {
@@ -833,34 +851,31 @@ func (node *Proxy) SetWorkloadLabels(env *Environment) {
 	node.Metadata.Labels = env.GetProxyWorkloadLabels(node)
 }
 
-// DiscoverIPVersions discovers the IP Versions supported by Proxy based on its IP addresses.
-func (node *Proxy) DiscoverIPVersions() {
-	for i := 0; i < len(node.IPAddresses); i++ {
-		addr := net.ParseIP(node.IPAddresses[i])
-		if addr == nil {
-			// Should not happen, invalid IP in proxy's IPAddresses slice should have been caught earlier,
-			// skip it to prevent a panic.
-			continue
-		}
-		if node.GlobalUnicastIP == "" && addr.IsGlobalUnicast() {
-			node.GlobalUnicastIP = addr.String()
-		}
-		if addr.To4() != nil {
-			node.ipv4Support = true
-		} else {
-			node.ipv6Support = true
-		}
+// DiscoverIPMode discovers the IP Versions supported by Proxy based on its IP addresses.
+func (node *Proxy) DiscoverIPMode() {
+	if networkutil.AllIPv4(node.IPAddresses) {
+		node.ipMode = IPv4
+	} else if networkutil.AllIPv6(node.IPAddresses) {
+		node.ipMode = IPv6
+	} else {
+		node.ipMode = Dual
 	}
+	node.GlobalUnicastIP = networkutil.GlobalUnicastIP(node.IPAddresses)
 }
 
 // SupportsIPv4 returns true if proxy supports IPv4 addresses.
 func (node *Proxy) SupportsIPv4() bool {
-	return node.ipv4Support
+	return node.ipMode == IPv4 || node.ipMode == Dual
 }
 
 // SupportsIPv6 returns true if proxy supports IPv6 addresses.
 func (node *Proxy) SupportsIPv6() bool {
-	return node.ipv6Support
+	return node.ipMode == IPv6 || node.ipMode == Dual
+}
+
+// IsIPv6 returns true if proxy only supports IPv6 addresses.
+func (node *Proxy) IsIPv6() bool {
+	return node.ipMode == IPv6
 }
 
 // ParseMetadata parses the opaque Metadata from an Envoy Node into string key-value pairs.
@@ -1086,7 +1101,7 @@ func (node *Proxy) IsProxylessGrpc() bool {
 }
 
 type GatewayController interface {
-	ConfigStoreCache
+	ConfigStoreController
 	// Recompute updates the internal state of the gateway controller for a given input. This should be
 	// called before any List/Get calls if the state has changed
 	Recompute(GatewayContext) error

@@ -38,6 +38,7 @@ import (
 	"istio.io/istio/pilot/pkg/networking/util"
 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
 	"istio.io/istio/pilot/test/xdstest"
+	"istio.io/istio/pkg/config/mesh"
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/test/util/assert"
 	"istio.io/istio/pkg/util/protomarshal"
@@ -103,16 +104,13 @@ func TestListenerAccessLog(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			// Update MeshConfig
-			env := buildListenerEnv(nil)
-			env.Mesh().AccessLogFile = "foo"
-			env.Mesh().AccessLogEncoding = tc.encoding
-			env.Mesh().AccessLogFormat = tc.format
-
-			// Trigger MeshConfig change and validate that access log is recomputed.
+			m := mesh.DefaultMeshConfig()
+			m.AccessLogFile = "foo"
+			m.AccessLogEncoding = tc.encoding
+			m.AccessLogFormat = tc.format
+			listeners := buildListeners(t, TestOptions{MeshConfig: m}, nil)
 			accessLogBuilder.reset()
-
 			// Validate that access log filter uses the new format.
-			listeners := buildAllListeners(&fakePlugin{}, env, getProxy())
 			for _, l := range listeners {
 				if l.AccessLog[0].Filter == nil {
 					t.Fatal("expected filter config in listener access log configuration")
@@ -325,8 +323,8 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
 				Name: "grpc-http-als",
 				Provider: &meshconfig.MeshConfig_ExtensionProvider_EnvoyHttpAls{
 					EnvoyHttpAls: &meshconfig.MeshConfig_ExtensionProvider_EnvoyHttpGrpcV3LogProvider{
-						LogName:                         "grpc-otel-als",
-						Service:                         "otel.foo.svc.cluster.local",
+						LogName:                         "grpc-http-als",
+						Service:                         "grpc-als.foo.svc.cluster.local",
 						Port:                            9811,
 						AdditionalRequestHeadersToLog:   []string{"fake-request-header1"},
 						AdditionalResponseHeadersToLog:  []string{"fake-response-header1"},
@@ -352,8 +350,8 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
 				Name: "grpc-tcp-als",
 				Provider: &meshconfig.MeshConfig_ExtensionProvider_EnvoyTcpAls{
 					EnvoyTcpAls: &meshconfig.MeshConfig_ExtensionProvider_EnvoyTcpGrpcV3LogProvider{
-						LogName:                 "grpc-tcp-otel-als",
-						Service:                 "otel.foo.svc.cluster.local",
+						LogName:                 "grpc-tcp-als",
+						Service:                 "grpc-als.foo.svc.cluster.local",
 						Port:                    9811,
 						FilterStateObjectsToLog: fakeFilterStateObjects,
 					},
@@ -393,14 +391,16 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
 		},
 	}
 
-	grpcBackEndClusterName := "outbound|9811||otel.foo.svc.cluster.local"
+	grpcBackendClusterName := "outbound|9811||grpc-als.foo.svc.cluster.local"
+	grpcBackendAuthority := "grpc-als.foo.svc.cluster.local"
 	otelCfg := &otelaccesslog.OpenTelemetryAccessLogConfig{
 		CommonConfig: &grpcaccesslog.CommonGrpcAccessLogConfig{
 			LogName: otelEnvoyAccessLogFriendlyName,
 			GrpcService: &core.GrpcService{
 				TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
 					EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
-						ClusterName: grpcBackEndClusterName,
+						ClusterName: grpcBackendClusterName,
+						Authority:   grpcBackendAuthority,
 					},
 				},
 			},
@@ -418,7 +418,7 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
 	}
 
 	clusterLookupFn = func(push *model.PushContext, service string, port int) (hostname string, cluster string, err error) {
-		return "", grpcBackEndClusterName, nil
+		return grpcBackendAuthority, grpcBackendClusterName, nil
 	}
 
 	stdout := &fileaccesslog.FileAccessLog{
@@ -514,13 +514,14 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
 		},
 	}
 
-	grpcout := &grpcaccesslog.HttpGrpcAccessLogConfig{
+	grpcHTTPout := &grpcaccesslog.HttpGrpcAccessLogConfig{
 		CommonConfig: &grpcaccesslog.CommonGrpcAccessLogConfig{
-			LogName: "grpc-otel-als",
+			LogName: "grpc-http-als",
 			GrpcService: &core.GrpcService{
 				TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
 					EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
-						ClusterName: grpcBackEndClusterName,
+						ClusterName: grpcBackendClusterName,
+						Authority:   grpcBackendAuthority,
 					},
 				},
 			},
@@ -534,11 +535,12 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
 
 	grpcTCPOut := &grpcaccesslog.TcpGrpcAccessLogConfig{
 		CommonConfig: &grpcaccesslog.CommonGrpcAccessLogConfig{
-			LogName: "grpc-tcp-otel-als",
+			LogName: "grpc-tcp-als",
 			GrpcService: &core.GrpcService{
 				TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
 					EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
-						ClusterName: grpcBackEndClusterName,
+						ClusterName: grpcBackendClusterName,
+						Authority:   grpcBackendAuthority,
 					},
 				},
 			},
@@ -762,7 +764,7 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
 				},
 				{
 					Name:       wellknown.HTTPGRPCAccessLog,
-					ConfigType: &accesslog.AccessLog_TypedConfig{TypedConfig: util.MessageToAny(grpcout)},
+					ConfigType: &accesslog.AccessLog_TypedConfig{TypedConfig: util.MessageToAny(grpcHTTPout)},
 				},
 			},
 		},
@@ -865,10 +867,12 @@ spec:
 
 func TestBuildOpenTelemetryAccessLogConfig(t *testing.T) {
 	fakeCluster := "outbound|55680||otel-collector.monitoring.svc.cluster.local"
+	fakeAuthority := "otel-collector.monitoring.svc.cluster.local"
 	for _, tc := range []struct {
 		name        string
 		logName     string
 		clusterName string
+		hostname    string
 		body        string
 		labels      *structpb.Struct
 		expected    *otelaccesslog.OpenTelemetryAccessLogConfig
@@ -877,6 +881,7 @@ func TestBuildOpenTelemetryAccessLogConfig(t *testing.T) {
 			name:        "default",
 			logName:     otelEnvoyAccessLogFriendlyName,
 			clusterName: fakeCluster,
+			hostname:    fakeAuthority,
 			body:        EnvoyTextLogFormat,
 			expected: &otelaccesslog.OpenTelemetryAccessLogConfig{
 				CommonConfig: &grpcaccesslog.CommonGrpcAccessLogConfig{
@@ -885,6 +890,7 @@ func TestBuildOpenTelemetryAccessLogConfig(t *testing.T) {
 						TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
 							EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
 								ClusterName: fakeCluster,
+								Authority:   fakeAuthority,
 							},
 						},
 					},
@@ -902,6 +908,7 @@ func TestBuildOpenTelemetryAccessLogConfig(t *testing.T) {
 			name:        "with attrs",
 			logName:     otelEnvoyAccessLogFriendlyName,
 			clusterName: fakeCluster,
+			hostname:    fakeAuthority,
 			body:        EnvoyTextLogFormat,
 			labels: &structpb.Struct{
 				Fields: map[string]*structpb.Value{
@@ -915,6 +922,7 @@ func TestBuildOpenTelemetryAccessLogConfig(t *testing.T) {
 						TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
 							EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
 								ClusterName: fakeCluster,
+								Authority:   fakeAuthority,
 							},
 						},
 					},
@@ -938,7 +946,7 @@ func TestBuildOpenTelemetryAccessLogConfig(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildOpenTelemetryAccessLogConfig(tc.logName, tc.clusterName, tc.body, tc.labels)
+			got := buildOpenTelemetryAccessLogConfig(tc.logName, tc.hostname, tc.clusterName, tc.body, tc.labels)
 			assert.Equal(t, tc.expected, got)
 		})
 	}
